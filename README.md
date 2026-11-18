@@ -102,6 +102,20 @@ It can also sit in a layout as a side panel: a block with `{ "mod": "roadmap-pre
 - Lines are horizontal and vertical only: Herdr mods draw boxes, not paths. Zoom redraws every size times the zoom, since mods have no transforms.
 - The full build brief, for an agent rebuilding or changing it, is in [RECIPE.md](roadmap-preview/RECIPE.md).
 
+## Team Roadmap (fork customisation)
+
+`team-roadmap/` and `cli/team-roadmap` adapt `roadmap-preview` for preset agent teams:
+
+- Per-team `roadmap.json` store with strict schema validation, role permissions, assignment history, role queues (`claim`), and workspace tab management (`open-tab` / `close-tab`).
+- Live team roster bar with member highlight filter, member queue card, and clickable task detail card with markdown briefs.
+
+See [team-roadmap/RECIPE.md](team-roadmap/RECIPE.md) for the full layout, CLI, and install instructions:
+
+```sh
+cp -R team-roadmap/mods/team-roadmap ~/.config/herdr-app/mods/
+herdr-app check ~/.config/herdr-app/mods/team-roadmap
+```
+
 ## Credits
 
 The roadmap format and the plan → implement → archive loop come from the 10xDevs course by [Przeprogramowani](https://przeprogramowani.pl). This mod only reads it.
