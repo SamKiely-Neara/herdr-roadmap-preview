@@ -58,7 +58,7 @@ def team_home(tmp_path: Path) -> Path:
 
 def test_add_twice_and_snapshot(team_home: Path) -> None:
     """Adding two tasks yields T-1 and T-2; snapshot lists both at rev 2."""
-    r1 = _run(team_home, "add", TEAM, "--title", "First task", "--phase", "Setup")
+    r1 = _run(team_home, "add", TEAM, "--title", "First task", "--step", "write spec", "--step", "write code")
     r2 = _run(
         team_home,
         "add",
@@ -79,10 +79,15 @@ def test_add_twice_and_snapshot(team_home: Path) -> None:
     snap = _run(team_home, "snapshot", TEAM)
     assert snap.returncode == 0, snap.stderr
     data = json.loads(snap.stdout)
+    assert data["roadmap"]["schema"] == 2
     assert data["roadmap"]["rev"] == 2
     tasks = data["roadmap"]["tasks"]
     assert [t["id"] for t in tasks] == ["T-1", "T-2"]
-    assert tasks[0]["phase"] == "Setup"
+    assert tasks[0]["milestone"] is None
+    assert tasks[0]["steps"] == [
+        {"text": "write spec", "done": False},
+        {"text": "write code", "done": False},
+    ]
     assert tasks[1]["prereqs"] == ["T-1"]
     assert tasks[1]["brief"] == "Hello **md**\n"
 
@@ -177,7 +182,7 @@ def test_snapshot_since_detects_team_json_change(team_home: Path) -> None:
     """Adding a member to team.json invalidates the snapshot token."""
     first = json.loads(_run(team_home, "snapshot", TEAM).stdout)
     token = first["token"]
-    assert first["roadmap"] == {"schema": 1, "rev": 0, "tasks": []}
+    assert first["roadmap"] == {"schema": 2, "rev": 0, "milestones": [], "tasks": []}
 
     unchanged = json.loads(_run(team_home, "snapshot", TEAM, "--since", token).stdout)
     assert unchanged == {"unchanged": True}
@@ -231,8 +236,10 @@ def _valid_task(task_id: str = "T-1") -> dict:
         "id": task_id,
         "title": "Valid task",
         "status": "open",
-        "phase": "Setup",
+        "milestone": "M-1",
         "prereqs": [],
+        "blocker": None,
+        "steps": [],
         "brief": "",
         "created": "2026-11-18T15:30:00+11:00",
         "changed": "2026-11-18T15:30:00+11:00",
@@ -242,8 +249,17 @@ def _valid_task(task_id: str = "T-1") -> dict:
     }
 
 
+def _valid_milestone(ms_id: str = "M-1") -> dict:
+    return {
+        "id": ms_id,
+        "title": "Setup",
+        "goal": "Initial setup",
+        "created": "2026-11-18T15:30:00+11:00",
+    }
+
+
 def _corrupt_roadmap(case: str) -> dict:
-    base = {"schema": 1, "rev": 1, "tasks": [_valid_task("T-1")]}
+    base = {"schema": 2, "rev": 1, "milestones": [_valid_milestone("M-1")], "tasks": [_valid_task("T-1")]}
     t = base["tasks"][0]
     if case == "unknown-top-key":
         base["extra"] = 1
@@ -251,19 +267,49 @@ def _corrupt_roadmap(case: str) -> dict:
         t["extra"] = 1
     elif case == "missing-task-key":
         del t["brief"]
-    elif case == "schema-2":
-        base["schema"] = 2
+    elif case == "schema-3":
+        base["schema"] = 3
     elif case == "bad-status":
         t["status"] = "bogus"
     elif case == "bad-id":
         t["id"] = "X-1"
     elif case == "duplicate-id":
         base["tasks"].append(_valid_task("T-1"))
+    elif case == "title-over-80":
+        t["title"] = "x" * 81
+    elif case == "title-newline":
+        t["title"] = "line1\nline2"
+    elif case == "unknown-milestone":
+        t["milestone"] = "M-99"
+    elif case == "bad-milestone-id":
+        base["milestones"][0]["id"] = "P-1"
+        t["milestone"] = "P-1"
+    elif case == "duplicate-milestone-id":
+        base["milestones"].append(_valid_milestone("M-1"))
     elif case == "prereq-self":
         t["prereqs"] = ["T-1"]
-    elif case == "prereq-later":
+    elif case == "prereq-unknown":
         t["prereqs"] = ["T-2"]
-        base["tasks"].append(_valid_task("T-2"))
+    elif case == "prereq-duplicate":
+        t2 = _valid_task("T-2")
+        base["tasks"].append(t2)
+        t["prereqs"] = ["T-2", "T-2"]
+    elif case == "prereq-cycle":
+        t2 = _valid_task("T-2")
+        t["prereqs"] = ["T-2"]
+        t2["prereqs"] = ["T-1"]
+        base["tasks"].append(t2)
+    elif case == "blocked-no-reason":
+        t["status"] = "blocked"
+    elif case == "non-blocked-with-reason":
+        t["blocker"] = {"reason": "stale", "since": "2026-11-18T15:30:00+11:00", "by": f"{TEAM}-lead"}
+    elif case == "empty-blocker-reason":
+        t["status"] = "blocked"
+        t["blocker"] = {"reason": "   ", "since": "2026-11-18T15:30:00+11:00", "by": f"{TEAM}-lead"}
+    elif case == "step-empty":
+        t["steps"] = [{"text": "  ", "done": False}]
+    elif case == "step-non-bool":
+        t["steps"] = [{"text": "step", "done": "yes"}]
     elif case == "two-open-assignments":
         t["assignments"] = [
             {"member": f"{TEAM}-worker", "from": "2026-11-18T15:31:00+11:00", "to": None},
@@ -303,12 +349,24 @@ def _corrupt_roadmap(case: str) -> dict:
         "unknown-top-key",
         "unknown-task-key",
         "missing-task-key",
-        "schema-2",
+        "schema-3",
         "bad-status",
         "bad-id",
         "duplicate-id",
+        "title-over-80",
+        "title-newline",
+        "unknown-milestone",
+        "bad-milestone-id",
+        "duplicate-milestone-id",
         "prereq-self",
-        "prereq-later",
+        "prereq-unknown",
+        "prereq-duplicate",
+        "prereq-cycle",
+        "blocked-no-reason",
+        "non-blocked-with-reason",
+        "empty-blocker-reason",
+        "step-empty",
+        "step-non-bool",
         "two-open-assignments",
         "open-assignment-not-last",
         "to-before-from",
@@ -408,8 +466,8 @@ def test_partial_status_and_log_entries(team_home: Path, tmp_path: Path) -> None
         (f"{TEAM}-worker", ("add", TEAM, "--title", "Worker add"), 3),
         (f"{TEAM}-worker", ("set-status", TEAM, "T-1", "done"), 3),
         (f"{TEAM}-lead", ("set-status", TEAM, "T-1", "done"), 0),
-        (f"{TEAM}-worker", ("set-status", TEAM, "T-1", "blocked"), 0),
-        (f"{TEAM}-worker", ("set-status", TEAM, "T-2", "blocked"), 3),
+        (f"{TEAM}-worker", ("set-status", TEAM, "T-1", "blocked", "--reason", "waiting"), 0),
+        (f"{TEAM}-worker", ("set-status", TEAM, "T-2", "blocked", "--reason", "waiting"), 3),
         (None, ("add", TEAM, "--title", "Sam add"), 0),
         (None, ("set-status", TEAM, "T-1", "done"), 0),
         (None, ("assign", TEAM, "T-2", "worker"), 0),
@@ -619,3 +677,163 @@ def test_without_roadmap_tab_removes_tab_or_empty_space_and_ignores_absent() -> 
 
     assert cli_mod.without_roadmap_tab(stripped, "demo-team") is None
     assert cli_mod.without_roadmap_tab(doc_both, "missing-space") is None
+
+
+def test_v1_migration_preserves_phases_and_adds_blocked_placeholder(team_home: Path) -> None:
+    """v1 roadmap migrates phases to M-1..M-k in first-seen order and fills placeholder blocker reason."""
+    v1 = {
+        "schema": 1,
+        "rev": 5,
+        "tasks": [
+            {
+                "id": "T-1",
+                "title": "Fork repo",
+                "status": "done",
+                "phase": "1. Setup",
+                "prereqs": [],
+                "brief": "",
+                "created": "2026-11-18T15:00:00+11:00",
+                "changed": "2026-11-18T15:05:00+11:00",
+                "assignments": [],
+                "queue": None,
+                "log": [{"at": "2026-11-18T15:00:00+11:00", "by": f"{TEAM}-lead", "change": "added"}],
+            },
+            {
+                "id": "T-2",
+                "title": "Blocked task",
+                "status": "blocked",
+                "phase": None,
+                "prereqs": ["T-1"],
+                "brief": "",
+                "created": "2026-11-18T15:10:00+11:00",
+                "changed": "2026-11-18T15:15:00+11:00",
+                "assignments": [],
+                "queue": None,
+                "log": [{"at": "2026-11-18T15:10:00+11:00", "by": f"{TEAM}-worker", "change": "blocked"}],
+            },
+            {
+                "id": "T-3",
+                "title": "Another setup task",
+                "status": "open",
+                "phase": "1. Setup",
+                "prereqs": [],
+                "brief": "",
+                "created": "2026-11-18T15:20:00+11:00",
+                "changed": "2026-11-18T15:20:00+11:00",
+                "assignments": [],
+                "queue": None,
+                "log": [{"at": "2026-11-18T15:20:00+11:00", "by": f"{TEAM}-lead", "change": "added"}],
+            },
+        ],
+    }
+    (team_home / TEAM / "roadmap.json").write_text(json.dumps(v1, indent=2) + "\n", encoding="utf-8")
+
+    snap = _run(team_home, "snapshot", TEAM)
+    assert snap.returncode == 0, snap.stderr
+    rm = json.loads(snap.stdout)["roadmap"]
+    assert rm["schema"] == 2
+    assert rm["milestones"] == [{"id": "M-1", "title": "1. Setup", "goal": "", "created": "2026-11-18T15:00:00+11:00"}]
+    assert rm["tasks"][0]["milestone"] == "M-1"
+    assert rm["tasks"][1]["milestone"] is None
+    assert rm["tasks"][1]["blocker"] == {
+        "reason": "(no reason recorded)",
+        "since": "2026-11-18T15:15:00+11:00",
+        "by": f"{TEAM}-worker",
+    }
+    assert rm["tasks"][2]["milestone"] == "M-1"
+
+    # Next write persists schema 2
+    add_res = _run(team_home, "add", TEAM, "--title", "After migration")
+    assert add_res.returncode == 0, add_res.stderr
+    stored = json.loads((team_home / TEAM / "roadmap.json").read_text(encoding="utf-8"))
+    assert stored["schema"] == 2
+    assert stored["rev"] == 6
+
+
+def test_v1_migration_fails_loudly_on_title_over_80(team_home: Path) -> None:
+    """v1 title over 80 chars is not truncated and fails load() with exit 1."""
+    v1 = {
+        "schema": 1,
+        "rev": 1,
+        "tasks": [
+            {
+                "id": "T-1",
+                "title": "x" * 81,
+                "status": "open",
+                "phase": None,
+                "prereqs": [],
+                "brief": "",
+                "created": "2026-11-18T15:00:00+11:00",
+                "changed": "2026-11-18T15:00:00+11:00",
+                "assignments": [],
+                "queue": None,
+                "log": [{"at": "2026-11-18T15:00:00+11:00", "by": f"{TEAM}-lead", "change": "added"}],
+            }
+        ],
+    }
+    (team_home / TEAM / "roadmap.json").write_text(json.dumps(v1, indent=2) + "\n", encoding="utf-8")
+    res = _run(team_home, "snapshot", TEAM)
+    assert res.returncode == 1
+    assert "80" in res.stderr
+
+
+def test_blocker_reason_rules_on_add_and_set_status(team_home: Path) -> None:
+    """blocked requires --reason, non-blocked rejects --reason, changing reason logs, leaving clears."""
+    assert _run(team_home, "add", TEAM, "--title", "Bad", "--status", "blocked").returncode == 2
+    assert _run(team_home, "add", TEAM, "--title", "Bad", "--status", "open", "--reason", "nope").returncode == 2
+    assert _run(team_home, "add", TEAM, "--title", "x" * 81).returncode == 2
+
+    r1 = _run(team_home, "add", TEAM, "--title", "Wait on decision", "--status", "blocked", "--reason", "waiting D2")
+    assert r1.returncode == 0, r1.stderr
+    assert _run(team_home, "set-status", TEAM, "T-1", "open", "--reason", "extra").returncode == 2
+    assert _run(team_home, "set-status", TEAM, "T-1", "blocked").returncode == 2
+
+    # Same reason is a no-op
+    rev_before = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["rev"]
+    assert _run(team_home, "set-status", TEAM, "T-1", "blocked", "--reason", "waiting D2").returncode == 0
+    rev_same = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["rev"]
+    assert rev_same == rev_before
+
+    # Different reason replaces blocker and logs
+    assert _run(team_home, "set-status", TEAM, "T-1", "blocked", "--reason", "waiting D3").returncode == 0
+    t1 = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][0]
+    assert t1["blocker"]["reason"] == "waiting D3"
+    assert "blocker → waiting D3" in t1["log"][-1]["change"]
+
+    # Leaving blocked clears blocker
+    assert _run(team_home, "set-status", TEAM, "T-1", "open").returncode == 0
+    t1 = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][0]
+    assert t1["blocker"] is None
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_tasks", "expected_milestones"),
+    [
+        ("panel-v1.json", 14, []),
+        (
+            "territory-layout-v1.json",
+            11,
+            ["1. Setup & Design", "2. Core Helpers & Layout (C1-13)", "3. Persistence, Exclusion & Proof"],
+        ),
+    ],
+)
+def test_real_v1_fixture_migration(
+    tmp_path: Path, fixture_name: str, expected_tasks: int, expected_milestones: list[str]
+) -> None:
+    """Real v1 panel and territory-layout roadmaps migrate to schema 2 and still validate after save()."""
+    cli_mod = _load_cli_module()
+    fixture = Path(__file__).parent / "fixtures" / fixture_name
+    raw = json.loads(fixture.read_text(encoding="utf-8"))
+    team_dir = tmp_path / "t"
+    team_dir.mkdir()
+    (team_dir / "roadmap.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = cli_mod.load(team_dir)
+    assert loaded["schema"] == 2
+    assert len(loaded["tasks"]) == expected_tasks
+    assert [m["title"] for m in loaded["milestones"]] == expected_milestones
+
+    cli_mod.save(team_dir, loaded)
+    reloaded = cli_mod.load(team_dir)
+    assert reloaded["schema"] == 2
+    assert len(reloaded["tasks"]) == expected_tasks

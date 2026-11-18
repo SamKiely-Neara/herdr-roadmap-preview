@@ -21,11 +21,34 @@ from pathlib import Path
 
 TEAM_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,16}$")
 TASK_ID_RE = re.compile(r"^T-[1-9][0-9]*$")
+MILESTONE_ID_RE = re.compile(r"^M-[1-9][0-9]*$")
 MEMBER_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 VALID_STATUSES = ("open", "in-progress", "partial", "blocked", "done", "parked")
 PRESET_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-TOP_KEYS = frozenset({"schema", "rev", "tasks"})
+MAX_TITLE = 80
+TOP_KEYS = frozenset({"schema", "rev", "milestones", "tasks"})
+MILESTONE_KEYS = frozenset({"id", "title", "goal", "created"})
 TASK_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "status",
+        "milestone",
+        "prereqs",
+        "blocker",
+        "steps",
+        "brief",
+        "created",
+        "changed",
+        "assignments",
+        "queue",
+        "log",
+    }
+)
+BLOCKER_KEYS = frozenset({"reason", "since", "by"})
+STEP_KEYS = frozenset({"text", "done"})
+V1_TOP_KEYS = frozenset({"schema", "rev", "tasks"})
+V1_TASK_KEYS = frozenset(
     {"id", "title", "status", "phase", "prereqs", "brief", "created", "changed", "assignments", "queue", "log"}
 )
 ASSIGNMENT_KEYS = frozenset({"member", "from", "to"})
@@ -51,7 +74,7 @@ class SchemaError(Exception):
 
 
 def _empty_roadmap() -> dict:
-    return {"schema": 1, "rev": 0, "tasks": []}
+    return {"schema": 2, "rev": 0, "milestones": [], "tasks": []}
 
 
 def _is_int(value: object) -> bool:
@@ -70,17 +93,47 @@ def _parse_iso(value: object, path: str) -> datetime.datetime:
     return parsed
 
 
-
 def _validate_one_line(value: object, path: str, *, max_len: int | None = None, allow_empty: bool = False) -> str:
     if not isinstance(value, str):
         raise SchemaError(f"{path}: must be str")
-    if not allow_empty and not value.strip():
-        raise SchemaError(f"{path}: must be non-empty str with no newline")
     if "\n" in value or "\r" in value:
         raise SchemaError(f"{path}: must be one line with no newline")
+    if not allow_empty and not value.strip():
+        raise SchemaError(f"{path}: must be non-empty")
     if max_len is not None and len(value) > max_len:
-        raise SchemaError(f"{path}: must be <= {max_len} chars")
+        raise SchemaError(f"{path}: must be <= {max_len} chars (got {len(value)})")
     return value
+
+
+def _find_cycle(tasks: list[dict]) -> list[str] | None:
+    """Return a cycle path [A, ..., A] in task prereqs, or None if acyclic."""
+    adj: dict[str, list[str]] = {t["id"]: list(t["prereqs"]) for t in tasks}
+    state: dict[str, int] = {}  # 0/absent=unvisited, 1=visiting, 2=done
+    stack: list[str] = []
+
+    def dfs(node: str) -> list[str] | None:
+        state[node] = 1
+        stack.append(node)
+        for nxt in adj.get(node, ()):
+            st = state.get(nxt, 0)
+            if st == 1:
+                idx = stack.index(nxt)
+                return [*stack[idx:], nxt]
+            if st == 0:
+                found = dfs(nxt)
+                if found is not None:
+                    return found
+        stack.pop()
+        state[node] = 2
+        return None
+
+    for t in tasks:
+        tid = t["id"]
+        if state.get(tid, 0) == 0:
+            found = dfs(tid)
+            if found is not None:
+                return found
+    return None
 
 
 def _validate_assignments_and_log(task: dict, tp: str) -> None:
@@ -126,40 +179,63 @@ def _validate_assignments_and_log(task: dict, tp: str) -> None:
             raise SchemaError(f"{lp}.by: must match ^[a-z0-9][a-z0-9-]*$")
         _validate_one_line(entry["change"], f"{lp}.change")
 
+
 def validate_roadmap(roadmap: object) -> None:
-    """Validate stored roadmap.json. Raises SchemaError('<path>: <reason>') on first violation.
+    """Validate stored schema-2 roadmap.json. Raises SchemaError('<path>: <reason>') on first violation.
 
     Rules:
-        top level: dict with exactly schema, rev, tasks
-        schema: 1 (int, not bool)
+        top level: dict with exactly schema, rev, milestones, tasks
+        schema: 2 (int, not bool)
         rev: int >= 1 in a stored file
-        tasks[i]: dict with exactly id, title, status, phase, prereqs, brief, created, changed, assignments, queue, log
+        milestones[i]: dict with exactly id (^M-[1-9][0-9]*$, unique), title (non-empty <= 80 chars, one line),
+            goal (<= 160 chars, one line), order (int, unique)
+        tasks[i]: dict with exactly id, title, status, milestone, prereqs, brief, created, changed,
+            assignments, queue, blocker, steps, log
         id: matches ^T-[1-9][0-9]*$, unique across tasks
-        title: non-empty str, no newline
+        title: non-empty str <= 80 chars, no newline
         status: one of open, in-progress, partial, blocked, done, parked
-        phase: non-empty str or null
-        prereqs: list of unique ids of tasks earlier in the list
+        milestone: valid milestone id or null
+        prereqs: list of unique task ids (must form a DAG across all tasks)
         brief: str
         created, changed: ISO 8601 with UTC offset; changed >= created
         assignments[j]: dict with exactly member, from, to; member matches ^[a-z0-9][a-z0-9-]*$;
-            from timestamp; to timestamp >= from or null
-        assignments: from non-decreasing; at most one to: null, only on the last entry
+            from timestamp; to timestamp >= from or null; at most one to: null, only on the last entry
         queue: preset name matching ^[a-z0-9][a-z0-9-]*$ or null
-        log: non-empty list of {at, by, change}; at non-decreasing; by matches the member regex;
-            change a non-empty str with no newline
+        blocker: {reason, since, by} when status == 'blocked' (reason non-empty one line), else null
+        steps[j]: {text, done} with non-empty one-line text and bool done
+        log: non-empty list of {at, by, change}; at non-decreasing; by matches member regex;
+            change non-empty str with no newline
     """
-
     if not isinstance(roadmap, dict) or set(roadmap.keys()) != TOP_KEYS:
-        raise SchemaError("top level: must be dict with exactly schema, rev, tasks")
-    if not _is_int(roadmap["schema"]) or roadmap["schema"] != 1:
-        raise SchemaError("schema: must be 1")
+        raise SchemaError("top level: must be dict with exactly schema, rev, milestones, tasks")
+    if not _is_int(roadmap["schema"]) or roadmap["schema"] != 2:
+        raise SchemaError("schema: must be 2")
     if not _is_int(roadmap["rev"]) or roadmap["rev"] < 1:
         raise SchemaError("rev: must be int >= 1")
+
+    milestones = roadmap["milestones"]
+    if not isinstance(milestones, list):
+        raise SchemaError("milestones: must be a list")
+    milestone_ids: set[str] = set()
+    for idx, ms in enumerate(milestones):
+        mp = f"milestones[{idx}]"
+        if not isinstance(ms, dict) or set(ms.keys()) != MILESTONE_KEYS:
+            raise SchemaError(f"{mp}: must be dict with exact milestone keys")
+        ms_id = ms["id"]
+        if not isinstance(ms_id, str) or not MILESTONE_ID_RE.match(ms_id):
+            raise SchemaError(f"{mp}.id: must match ^M-[1-9][0-9]*$")
+        if ms_id in milestone_ids:
+            raise SchemaError(f"{mp}.id: duplicate id {ms_id}")
+        milestone_ids.add(ms_id)
+        _validate_one_line(ms["title"], f"{mp}.title", max_len=MAX_TITLE)
+        _validate_one_line(ms["goal"], f"{mp}.goal", allow_empty=True)
+        _parse_iso(ms["created"], f"{mp}.created")
+
     tasks = roadmap["tasks"]
     if not isinstance(tasks, list):
         raise SchemaError("tasks: must be a list")
 
-    earlier_ids: set[str] = set()
+    task_ids: set[str] = set()
     for idx, task in enumerate(tasks):
         tp = f"tasks[{idx}]"
         if not isinstance(task, dict) or set(task.keys()) != TASK_KEYS:
@@ -167,26 +243,54 @@ def validate_roadmap(roadmap: object) -> None:
         task_id = task["id"]
         if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
             raise SchemaError(f"{tp}.id: must match ^T-[1-9][0-9]*$")
-        if task_id in earlier_ids:
+        if task_id in task_ids:
             raise SchemaError(f"{tp}.id: duplicate id {task_id}")
+        task_ids.add(task_id)
 
-        _validate_one_line(task["title"], f"{tp}.title")
+    for idx, task in enumerate(tasks):
+        tp = f"tasks[{idx}]"
+        task_id = task["id"]
+        _validate_one_line(task["title"], f"{tp}.title", max_len=MAX_TITLE)
         if task["status"] not in VALID_STATUSES:
             raise SchemaError(f"{tp}.status: invalid status {task['status']!r}")
-        phase = task["phase"]
-        if phase is not None and (not isinstance(phase, str) or not phase.strip()):
-            raise SchemaError(f"{tp}.phase: must be non-empty str or null")
+        milestone = task["milestone"]
+        if milestone is not None and (not isinstance(milestone, str) or milestone not in milestone_ids):
+            raise SchemaError(f"{tp}.milestone: unknown milestone {milestone!r}")
 
         prereqs = task["prereqs"]
         if not isinstance(prereqs, list):
             raise SchemaError(f"{tp}.prereqs: must be a list")
         seen_prereqs: set[str] = set()
         for p_idx, prereq in enumerate(prereqs):
-            if not isinstance(prereq, str) or prereq not in earlier_ids:
-                raise SchemaError(f"{tp}.prereqs[{p_idx}]: must reference an earlier task id")
+            if not isinstance(prereq, str) or prereq not in task_ids:
+                raise SchemaError(f"{tp}.prereqs[{p_idx}]: must reference an existing task id")
+            if prereq == task_id:
+                raise SchemaError(f"{tp}.prereqs[{p_idx}]: task cannot depend on itself")
             if prereq in seen_prereqs:
                 raise SchemaError(f"{tp}.prereqs[{p_idx}]: duplicate prereq {prereq}")
             seen_prereqs.add(prereq)
+
+        blocker = task["blocker"]
+        if task["status"] == "blocked":
+            if not isinstance(blocker, dict) or set(blocker.keys()) != BLOCKER_KEYS:
+                raise SchemaError(f"{tp}.blocker: must be dict with exact blocker keys when blocked")
+            _validate_one_line(blocker["reason"], f"{tp}.blocker.reason")
+            _parse_iso(blocker["since"], f"{tp}.blocker.since")
+            if not isinstance(blocker["by"], str) or not MEMBER_RE.match(blocker["by"]):
+                raise SchemaError(f"{tp}.blocker.by: must match ^[a-z0-9][a-z0-9-]*$")
+        elif blocker is not None:
+            raise SchemaError(f"{tp}.blocker: must be null when status is {task['status']!r}")
+
+        steps = task["steps"]
+        if not isinstance(steps, list):
+            raise SchemaError(f"{tp}.steps: must be a list")
+        for s_idx, step in enumerate(steps):
+            sp = f"{tp}.steps[{s_idx}]"
+            if not isinstance(step, dict) or set(step.keys()) != STEP_KEYS:
+                raise SchemaError(f"{sp}: must be dict with exact step keys")
+            _validate_one_line(step["text"], f"{sp}.text")
+            if not isinstance(step["done"], bool):
+                raise SchemaError(f"{sp}.done: must be bool")
 
         if not isinstance(task["brief"], str):
             raise SchemaError(f"{tp}.brief: must be str")
@@ -196,7 +300,10 @@ def validate_roadmap(roadmap: object) -> None:
             raise SchemaError(f"{tp}.changed: must be >= created")
 
         _validate_assignments_and_log(task, tp)
-        earlier_ids.add(task_id)
+
+    cycle = _find_cycle(tasks)
+    if cycle is not None:
+        raise SchemaError(f"prereqs: cycle detected ({' -> '.join(cycle)})")
 
 
 def validate_team(team: object, expected_team: str | None = None) -> None:
@@ -243,8 +350,84 @@ def _read_team_json(team_dir: Path) -> tuple[bytes, dict]:
     return raw, data
 
 
+def _migrate_v1_to_v2(data: dict) -> dict:
+    """Migrate a schema 1 roadmap dict to schema 2 in memory and validate it."""
+    if set(data.keys()) != V1_TOP_KEYS:
+        raise SchemaError("top level: v1 must be dict with exactly schema, rev, tasks")
+    if not _is_int(data["rev"]) or data["rev"] < 1:
+        raise SchemaError("rev: must be int >= 1")
+    raw_tasks = data["tasks"]
+    if not isinstance(raw_tasks, list):
+        raise SchemaError("tasks: must be a list")
+
+    milestones: list[dict] = []
+    phase_to_mid: dict[str, str] = {}
+    tasks: list[dict] = []
+    for idx, raw_task in enumerate(raw_tasks):
+        tp = f"tasks[{idx}]"
+        if not isinstance(raw_task, dict) or set(raw_task.keys()) != V1_TASK_KEYS:
+            raise SchemaError(f"{tp}: v1 must be dict with exact v1 task keys")
+        phase = raw_task["phase"]
+        if phase is not None:
+            if not isinstance(phase, str) or not phase.strip():
+                raise SchemaError(f"{tp}.phase: must be non-empty str or null")
+            phase_key = phase.strip()
+            if phase_key not in phase_to_mid:
+                mid = f"M-{len(milestones) + 1}"
+                phase_to_mid[phase_key] = mid
+                milestones.append(
+                    {
+                        "id": mid,
+                        "title": phase_key,
+                        "goal": "",
+                        "created": raw_task["created"],
+                    }
+                )
+            milestone_id: str | None = phase_to_mid[phase_key]
+        else:
+            milestone_id = None
+
+        if raw_task["status"] == "blocked":
+            log = raw_task.get("log")
+            by = log[-1]["by"] if isinstance(log, list) and log and isinstance(log[-1], dict) else "sam"
+            blocker: dict | None = {
+                "reason": "(no reason recorded)",
+                "since": raw_task["changed"],
+                "by": by,
+            }
+        else:
+            blocker = None
+
+        tasks.append(
+            {
+                "id": raw_task["id"],
+                "title": raw_task["title"],
+                "status": raw_task["status"],
+                "milestone": milestone_id,
+                "prereqs": list(raw_task["prereqs"]),
+                "blocker": blocker,
+                "steps": [],
+                "brief": raw_task["brief"],
+                "created": raw_task["created"],
+                "changed": raw_task["changed"],
+                "assignments": copy.deepcopy(raw_task["assignments"]),
+                "queue": raw_task["queue"],
+                "log": copy.deepcopy(raw_task["log"]),
+            }
+        )
+
+    migrated = {
+        "schema": 2,
+        "rev": data["rev"],
+        "milestones": milestones,
+        "tasks": tasks,
+    }
+    validate_roadmap(migrated)
+    return migrated
+
+
 def load(team_dir: Path) -> dict:
-    """Return validated roadmap.json, or the empty default when absent."""
+    """Return validated schema-2 roadmap.json (migrating v1 in memory), or the empty default when absent."""
     roadmap_path = team_dir / "roadmap.json"
     if not roadmap_path.exists():
         return _empty_roadmap()
@@ -252,6 +435,8 @@ def load(team_dir: Path) -> dict:
         data = json.loads(roadmap_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SchemaError(f"cannot parse JSON ({exc})") from exc
+    if isinstance(data, dict) and data.get("schema") == 1:
+        return _migrate_v1_to_v2(data)
     validate_roadmap(data)
     return data
 
@@ -385,6 +570,24 @@ def _pause_other_tasks(roadmap: dict, team: str, member: str, keep_id: str, who:
     return paused
 
 
+def _one_line_arg(value: str, field: str, *, max_len: int | None = None) -> str:
+    stripped = value.strip()
+    if not stripped or "\n" in value or "\r" in value:
+        raise CliError(f"{field} must be non-empty with no newline")
+    if max_len is not None and len(stripped) > max_len:
+        raise CliError(f"{field} must be <= {max_len} chars (got {len(stripped)})")
+    return stripped
+
+
+def _validate_reason_arg(status: str, reason: str | None) -> str | None:
+    if status == "blocked":
+        if reason is None:
+            raise CliError("status 'blocked' requires a non-empty one-line --reason")
+        return _one_line_arg(reason, "--reason")
+    if reason is not None:
+        raise CliError(f"--reason is only allowed when status is 'blocked' (got {status!r})")
+    return None
+
 def cmd_add(args: argparse.Namespace) -> None:
     """Handle the 'add' subcommand."""
     team_dir = _team_dir(args.team)
@@ -394,18 +597,28 @@ def cmd_add(args: argparse.Namespace) -> None:
     known = members(team_data)
     if args.status not in VALID_STATUSES:
         raise CliError(f"invalid status {args.status!r} (valid: {', '.join(VALID_STATUSES)})")
-    if not args.title.strip() or "\n" in args.title or "\r" in args.title:
-        raise CliError("title must be non-empty with no newline")
+    title = _one_line_arg(args.title, "title", max_len=MAX_TITLE)
+    reason = _validate_reason_arg(args.status, args.reason)
     assignee = resolve_member(args.team, args.assign, known) if args.assign else None
     queue_preset = args.queue
     if queue_preset is not None and queue_preset not in _member_presets(team_data):
         raise CliError(f"unknown preset {queue_preset!r} (presets: {', '.join(sorted(_member_presets(team_data)))})")
     brief = _read_brief(args.brief_file)
-    phase = args.phase.strip() if args.phase is not None and args.phase.strip() else None
+    milestone_id = args.milestone.strip() if args.milestone is not None and args.milestone.strip() else None
     prereqs = args.prereq or []
+    if len(set(prereqs)) != len(prereqs):
+        raise CliError("duplicate prereq in --prereq")
+    steps_raw = args.step or []
+    steps: list[dict] = []
+    for s in steps_raw:
+        steps.append({"text": _one_line_arg(s, "step text"), "done": False})
 
     with locked(team_dir):
         roadmap = load(team_dir)
+        if milestone_id is not None:
+            milestone_ids = {m["id"] for m in roadmap["milestones"]}
+            if milestone_id not in milestone_ids:
+                raise CliError(f"unknown milestone {milestone_id}")
         existing_ids = {t["id"] for t in roadmap["tasks"]}
         for prereq in prereqs:
             if prereq not in existing_ids:
@@ -415,13 +628,16 @@ def cmd_add(args: argparse.Namespace) -> None:
         ts = now()
         who = actor()
         assignments = [{"member": assignee, "from": ts, "to": None}] if assignee else []
+        blocker = {"reason": reason, "since": ts, "by": who} if reason is not None else None
         roadmap["tasks"].append(
             {
                 "id": task_id,
                 "title": args.title,
                 "status": args.status,
-                "phase": phase,
+                "milestone": milestone_id,
                 "prereqs": list(prereqs),
+                "blocker": blocker,
+                "steps": steps,
                 "brief": brief,
                 "created": ts,
                 "changed": ts,
@@ -448,6 +664,7 @@ def cmd_set_status(args: argparse.Namespace) -> None:
     who = actor()
     if args.status not in VALID_STATUSES:
         raise CliError(f"invalid status {args.status!r} (valid: {', '.join(VALID_STATUSES)})")
+    reason = _validate_reason_arg(args.status, args.reason)
     with locked(team_dir):
         roadmap = load(team_dir)
         task = _find_task(roadmap, args.id)
@@ -468,12 +685,24 @@ def cmd_set_status(args: argparse.Namespace) -> None:
                 "only the lead or the assignee can change status",
             )
         old_status = task["status"]
-        if old_status == args.status:
-            return
         ts = now()
+        if old_status == args.status:
+            if args.status == "blocked":
+                if task["blocker"]["reason"] == reason:
+                    return
+                task["blocker"] = {"reason": reason, "since": ts, "by": who}
+                task["changed"] = ts
+                task["log"].append({"at": ts, "by": who, "change": f"blocker → {reason}"})
+                save(team_dir, roadmap)
+            return
         task["status"] = args.status
         task["changed"] = ts
-        task["log"].append({"at": ts, "by": who, "change": f"status {old_status} → {args.status}"})
+        if args.status == "blocked":
+            task["blocker"] = {"reason": reason, "since": ts, "by": who}
+            task["log"].append({"at": ts, "by": who, "change": f"status {old_status} → blocked ({reason})"})
+        else:
+            task["blocker"] = None
+            task["log"].append({"at": ts, "by": who, "change": f"status {old_status} → {args.status}"})
         paused = (
             _pause_other_tasks(roadmap, args.team, active["member"], args.id, who, ts)
             if args.status == "in-progress" and active is not None
@@ -756,10 +985,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("team")
     p_add.add_argument("--title", required=True)
     p_add.add_argument("--brief-file", default=None)
-    p_add.add_argument("--phase", default=None)
+    p_add.add_argument("--milestone", default=None)
     p_add.add_argument("--prereq", nargs="+", action="extend", default=[])
+    p_add.add_argument("--step", action="append", default=[])
     p_add.add_argument("--assign", default=None)
     p_add.add_argument("--status", default="open")
+    p_add.add_argument("--reason", default=None)
     p_add.add_argument("--queue", default=None)
     p_add.set_defaults(func=cmd_add)
 
@@ -767,6 +998,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("team")
     p_status.add_argument("id")
     p_status.add_argument("status")
+    p_status.add_argument("--reason", default=None)
     p_status.set_defaults(func=cmd_set_status)
 
     p_assign = sub.add_parser("assign", help="Assign or unassign a task.")

@@ -1,0 +1,347 @@
+{
+  "schema": 1,
+  "rev": 17,
+  "tasks": [
+    {
+      "id": "T-1",
+      "title": "Comment box UI (#12) + auto-seen + Other box",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:00+11:00",
+      "changed": "2026-11-18T16:39:00+11:00",
+      "assignments": [
+        {
+          "member": "panel-worker2",
+          "from": "2026-11-18T16:39:00+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:00+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-2",
+      "title": "U1 merged-detail bloat fix + backfill",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:00+11:00",
+      "changed": "2026-11-18T16:39:00+11:00",
+      "assignments": [
+        {
+          "member": "panel-worker",
+          "from": "2026-11-18T16:39:00+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:00+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-3",
+      "title": "U2 clean communicator docs across all tasks",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:00+11:00",
+      "changed": "2026-11-18T16:39:00+11:00",
+      "assignments": [
+        {
+          "member": "panel-worker",
+          "from": "2026-11-18T16:39:00+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:00+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-4",
+      "title": "safeMarkdown < escape fix",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:00+11:00",
+      "changed": "2026-11-18T16:39:00+11:00",
+      "assignments": [
+        {
+          "member": "panel-worker2",
+          "from": "2026-11-18T16:39:00+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:00+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-5",
+      "title": "seen-leaves: hide greyed-out seen/merged items",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:00+11:00",
+      "changed": "2026-11-18T16:39:00+11:00",
+      "assignments": [
+        {
+          "member": "panel-worker3",
+          "from": "2026-11-18T16:39:00+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:00+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-6",
+      "title": "H1a: Mac TextView.html renderer",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:00+11:00",
+      "changed": "2026-11-18T16:39:00+11:00",
+      "assignments": [
+        {
+          "member": "panel-worker2",
+          "from": "2026-11-18T16:39:00+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:00+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-7",
+      "title": "H1b: mrc HTML expand backend + backfill",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:10+11:00",
+      "changed": "2026-11-18T16:39:42+11:00",
+      "assignments": [
+        {
+          "member": "panel-worker",
+          "from": "2026-11-18T16:39:10+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:10+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        },
+        {
+          "at": "2026-11-18T16:39:42+11:00",
+          "by": "panel-lead",
+          "change": "status in-progress \u2192 done"
+        }
+      ]
+    },
+    {
+      "id": "T-8",
+      "title": "R1-R4: Cross-host status-board routing enforcement",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:10+11:00",
+      "changed": "2026-11-18T17:09:49+11:00",
+      "assignments": [
+        {
+          "member": "panel-coder",
+          "from": "2026-11-18T16:39:10+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:10+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        },
+        {
+          "at": "2026-11-18T17:09:49+11:00",
+          "by": "panel-lead",
+          "change": "status in-progress \u2192 done"
+        }
+      ]
+    },
+    {
+      "id": "T-9",
+      "title": "Spec 2: Communicator-enforced HTML + Hydrogen plots (all item types)",
+      "status": "in-progress",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:10+11:00",
+      "changed": "2026-11-18T17:11:23+11:00",
+      "assignments": [
+        {
+          "member": "panel-coder",
+          "from": "2026-11-18T16:39:10+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:10+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        },
+        {
+          "at": "2026-11-18T17:11:23+11:00",
+          "by": "panel-lead",
+          "change": "status open \u2192 in-progress"
+        }
+      ]
+    },
+    {
+      "id": "T-10",
+      "title": "Rename Mac status-panel mod -> status-board",
+      "status": "open",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:39:10+11:00",
+      "changed": "2026-11-18T16:39:10+11:00",
+      "assignments": [
+        {
+          "member": "panel-coder",
+          "from": "2026-11-18T16:39:10+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:39:10+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-11",
+      "title": "Mac team kickoff, mrc pull & GUI manual verification",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T17:11:23+11:00",
+      "changed": "2026-11-18T17:11:23+11:00",
+      "assignments": [],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T17:11:23+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-12",
+      "title": "Mac safety & SSH ForwardAgent decisions (#6, #7)",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T17:11:23+11:00",
+      "changed": "2026-11-18T17:11:23+11:00",
+      "assignments": [],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T17:11:23+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-13",
+      "title": "H2a: Mac PNG data: images, <mark>, decision HTML",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T17:11:23+11:00",
+      "changed": "2026-11-18T17:11:23+11:00",
+      "assignments": [],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T17:11:23+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-14",
+      "title": "H2b: mrc HTML decisions & image placeholders (approved)",
+      "status": "done",
+      "phase": null,
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T17:11:23+11:00",
+      "changed": "2026-11-18T17:11:23+11:00",
+      "assignments": [],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T17:11:23+11:00",
+          "by": "panel-lead",
+          "change": "added"
+        }
+      ]
+    }
+  ]
+}

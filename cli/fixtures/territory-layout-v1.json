@@ -1,0 +1,289 @@
+{
+  "schema": 1,
+  "rev": 15,
+  "tasks": [
+    {
+      "id": "T-1",
+      "title": "Fork repo, remotes & branch (sam/territory-custom)",
+      "status": "done",
+      "phase": "1. Setup & Design",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:11+11:00",
+      "changed": "2026-11-18T16:38:11+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-worker",
+          "from": "2026-11-18T16:38:11+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:11+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-2",
+      "title": "Probe Mac+mrct omp transcripts, hc, Python AST",
+      "status": "done",
+      "phase": "1. Setup & Design",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:11+11:00",
+      "changed": "2026-11-18T16:38:11+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-worker",
+          "from": "2026-11-18T16:38:11+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:11+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-3",
+      "title": "Architecture & 15-commit spec",
+      "status": "done",
+      "phase": "1. Setup & Design",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:11+11:00",
+      "changed": "2026-11-18T16:38:11+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-problem-solver",
+          "from": "2026-11-18T16:38:11+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:11+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-4",
+      "title": "Commits 1-6: helpers, git identity, treemap",
+      "status": "done",
+      "phase": "2. Core Helpers & Layout (C1-13)",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:11+11:00",
+      "changed": "2026-11-18T16:38:11+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-worker",
+          "from": "2026-11-18T16:38:11+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:11+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-5",
+      "title": "Commits 7-9: Python AST symbols & treemap function blocks",
+      "status": "done",
+      "phase": "2. Core Helpers & Layout (C1-13)",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:11+11:00",
+      "changed": "2026-11-18T16:38:11+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-worker",
+          "from": "2026-11-18T16:38:11+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:11+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-6",
+      "title": "Commits 10-11: multi-repo treemap & repo/path activity keys",
+      "status": "done",
+      "phase": "2. Core Helpers & Layout (C1-13)",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:11+11:00",
+      "changed": "2026-11-18T16:38:11+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-worker",
+          "from": "2026-11-18T16:38:11+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:11+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-7",
+      "title": "Commits 12-13: Mac+mrct agent transcripts & repo mapping",
+      "status": "done",
+      "phase": "2. Core Helpers & Layout (C1-13)",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:11+11:00",
+      "changed": "2026-11-18T16:38:11+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-worker",
+          "from": "2026-11-18T16:38:11+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:11+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    },
+    {
+      "id": "T-8",
+      "title": "Commit 14: persistent repo exclusion & DVC default",
+      "status": "done",
+      "phase": "3. Persistence, Exclusion & Proof",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:51+11:00",
+      "changed": "2026-11-18T16:55:28+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-worker",
+          "from": "2026-11-18T16:38:51+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:51+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        },
+        {
+          "at": "2026-11-18T16:55:28+11:00",
+          "by": "territory-layout-lead",
+          "change": "status in-progress \u2192 done"
+        }
+      ]
+    },
+    {
+      "id": "T-9",
+      "title": "Commit 15: install layouts/mods & herdr-app check",
+      "status": "in-progress",
+      "phase": "3. Persistence, Exclusion & Proof",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:51+11:00",
+      "changed": "2026-11-18T16:55:28+11:00",
+      "assignments": [],
+      "queue": "worker",
+      "log": [
+        {
+          "at": "2026-11-18T16:38:51+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        },
+        {
+          "at": "2026-11-18T16:55:28+11:00",
+          "by": "territory-layout-lead",
+          "change": "status open \u2192 in-progress"
+        }
+      ]
+    },
+    {
+      "id": "T-10",
+      "title": "Verify isolated HERDR_APP_HOME (open -g -j -n) screenshot recipe",
+      "status": "in-progress",
+      "phase": "3. Persistence, Exclusion & Proof",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:51+11:00",
+      "changed": "2026-11-18T16:51:36+11:00",
+      "assignments": [
+        {
+          "member": "territory-layout-problem-solver",
+          "from": "2026-11-18T16:38:51+11:00",
+          "to": null
+        }
+      ],
+      "queue": null,
+      "log": [
+        {
+          "at": "2026-11-18T16:38:51+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        },
+        {
+          "at": "2026-11-18T16:50:03+11:00",
+          "by": "territory-layout-lead",
+          "change": "status in-progress \u2192 done"
+        },
+        {
+          "at": "2026-11-18T16:51:36+11:00",
+          "by": "territory-layout-lead",
+          "change": "status done \u2192 in-progress"
+        }
+      ]
+    },
+    {
+      "id": "T-11",
+      "title": "Isolated GUI screenshot proof & final report",
+      "status": "open",
+      "phase": "3. Persistence, Exclusion & Proof",
+      "prereqs": [],
+      "brief": "",
+      "created": "2026-11-18T16:38:51+11:00",
+      "changed": "2026-11-18T16:38:51+11:00",
+      "assignments": [],
+      "queue": "communicator",
+      "log": [
+        {
+          "at": "2026-11-18T16:38:51+11:00",
+          "by": "territory-layout-lead",
+          "change": "added"
+        }
+      ]
+    }
+  ]
+}
