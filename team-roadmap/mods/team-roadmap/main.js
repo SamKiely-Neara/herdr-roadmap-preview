@@ -346,38 +346,203 @@ export default class TeamRoadmap extends View {
     return div().text_size(SMALL).font_semibold().text_color(t.muted).child(title);
   }
 
-  sideCard(t) {
-    return v_flex().w(360).flex_none().border_l(1).border_color(t.border).bg(t.surface)
-      .overflow_y_scrollbar().p(16).gap(12);
+  livePillColor(live, t, c) {
+    if (live === "working") return c.active;
+    if (live === "blocked") return c.blocked;
+    if (live === "idle") return t.muted;
+    return t.dim;
   }
 
-  memberCard(member, taskById, t, c, stop) {
-    const openTasks = member.open.map((id) => taskById.get(id)).filter(Boolean);
-    const queuedTasks = member.queued.map((id) => taskById.get(id)).filter(Boolean);
-    const taskRow = (prefix, it) => h_flex().id(`rm-${prefix}-${it.id}`).gap(8).items_center().px(6).py(4).rounded(4)
-      .cursor_pointer().hover((s) => s.bg(t.hover))
-      .on_mouse_down("left", stop)
-      .on_click((_e, cx) => { this.task = it.id; cx.notify(); })
-      .child(div().flex_none().text_size(SMALL).font_semibold().text_color(t.muted).child(it.id))
-      .child(div().flex_1().min_w(0).truncate().text_size(MID).text_color(t.foreground).child(it.title))
-      .child(div().flex_none().text_size(SMALL).text_color(this.kindColor(it.kind, t, c)).child(it.status));
-    const stateText = member.role === "former" ? "former" : member.live;
-    return this.sideCard(t)
-      .child(h_flex().gap(8).items_center()
-        .child(div().flex_1().min_w(0).truncate().text_size(BIG).font_semibold().child(member.name))
-        .child(h_flex().id("rm-card-close").size(22).items_center().justify_center().rounded(4).cursor_pointer()
-          .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-          .on_mouse_down("left", stop).on_click((_e, cx) => { this.member = null; cx.notify(); }).child("×")))
-      .child(div().text_size(SMALL).text_color(t.muted).child(`${member.preset ?? member.role} · ${stateText}`))
-      .child(v_flex().gap(4).child(this.section("Open items", t))
-        .children(openTasks.length ? openTasks.map((it) => taskRow("mo", it))
-          : [div().text_size(SMALL).text_color(t.dim).child("None")]))
-      .when(Boolean(member.preset && queuedTasks.length), (el) => el.child(v_flex().gap(4)
-        .child(this.section(`In the ${member.preset} queue`, t))
-        .children(queuedTasks.map((it) => taskRow("mq", it)))));
+  teamQueuesBody(view, taskById, shorts, t, c, stop) {
+    const liveMembers = view.members.filter((m) => m.role !== "former");
+    const formerMembers = view.members.filter((m) => m.role === "former");
+    const memberBlock = (m) => {
+      const selected = this.member === m.name;
+      const pillColor = this.livePillColor(m.live, t, c);
+      const primary = m.doing[0] ? taskById.get(m.doing[0]) : null;
+      const otherOpen = m.open.filter((id) => id !== m.doing[0]).map((id) => taskById.get(id)).filter(Boolean);
+      return v_flex()
+        .gap(3)
+        .px(8)
+        .py(6)
+        .rounded(4)
+        .when(selected, (el) => el.bg(t.selected))
+        .child(
+          h_flex()
+            .id(`rm-m-${m.name}`)
+            .gap(8)
+            .items_center()
+            .cursor_pointer()
+            .hover((s) => s.bg(t.hover))
+            .on_mouse_down("left", stop)
+            .on_click((_e, cx) => {
+              this.member = selected ? null : m.name;
+              cx.notify();
+            })
+            .child(div().flex_1().truncate().font_semibold().child(`${m.short} · ${m.preset ?? m.role}`))
+            .child(
+              div()
+                .flex_none()
+                .text_size(SMALL)
+                .font_semibold()
+                .text_color(pillColor)
+                .child(m.live.toUpperCase()),
+            ),
+        )
+        .when(Boolean(primary), (el) =>
+          el.child(
+            h_flex()
+              .id(`rm-mp-${m.name}-${primary.id}`)
+              .pl(8)
+              .gap(6)
+              .items_center()
+              .cursor_pointer()
+              .rounded(4)
+              .hover((s) => s.bg(t.hover))
+              .on_mouse_down("left", stop)
+              .on_click((_e, cx) => {
+                this.selectTask(primary.id);
+                cx.notify();
+              })
+              .child(
+                div()
+                  .flex_1()
+                  .truncate()
+                  .text_size(SMALL)
+                  .text_color(t.foreground)
+                  .child(`→ ${primary.id} ${primary.title}${stepsText(primary) ? ` ${stepsText(primary)}` : ""}`),
+              ),
+          ),
+        )
+        .when(!primary && m.drift, (el) =>
+          el.child(
+            div()
+              .pl(8)
+              .text_size(SMALL)
+              .text_color(c.partial)
+              .child("working · no task on roadmap"),
+          ),
+        )
+        .when(!primary && !m.drift, (el) =>
+          el.child(div().pl(8).text_size(SMALL).text_color(t.dim).child(m.live === "offline" ? "offline" : "idle")),
+        )
+        .when(otherOpen.length > 0, (el) =>
+          el.child(
+            h_flex()
+              .pl(8)
+              .flex_wrap()
+              .gap(6)
+              .items_center()
+              .child(div().text_size(SMALL).text_color(t.muted).child("also:"))
+              .children(
+                otherOpen.map((ot) =>
+                  div()
+                    .id(`rm-ma-${m.name}-${ot.id}`)
+                    .px(4)
+                    .py(1)
+                    .rounded(3)
+                    .bg(t.chrome)
+                    .cursor_pointer()
+                    .text_size(SMALL)
+                    .text_color(this.kindColor(ot.kind, t, c))
+                    .hover((s) => s.bg(t.hover))
+                    .on_mouse_down("left", stop)
+                    .on_click((_e, cx) => {
+                      this.selectTask(ot.id);
+                      cx.notify();
+                    })
+                    .child(`${ot.id} (${ot.status})`),
+                ),
+              ),
+          ),
+        );
+    };
+
+
+    return v_flex()
+      .gap(12)
+      .child(v_flex().gap(4).children(liveMembers.map(memberBlock)))
+      .when(formerMembers.length > 0, (el) =>
+        el.child(
+          v_flex()
+            .gap(4)
+            .child(this.section("Former", t))
+            .children(
+              formerMembers.map((m) =>
+                h_flex()
+                  .id(`rm-m-${m.name}`)
+                  .px(8)
+                  .py(4)
+                  .rounded(4)
+                  .cursor_pointer()
+                  .when(this.member === m.name, (row) => row.bg(t.selected))
+                  .hover((s) => s.bg(t.hover))
+                  .on_mouse_down("left", stop)
+                  .on_click((_e, cx) => {
+                    this.member = this.member === m.name ? null : m.name;
+                    cx.notify();
+                  })
+                  .child(div().text_size(SMALL).text_color(t.dim).child(m.short)),
+              ),
+            ),
+        ),
+      )
+      .child(
+        v_flex()
+          .gap(8)
+          .pt(8)
+          .border_t(1)
+          .border_color(t.border)
+          .child(this.section("Queues", t))
+          .children(
+            view.queues.map((q) =>
+              v_flex()
+                .gap(3)
+                .child(
+                  div()
+                    .text_size(SMALL)
+                    .font_semibold()
+                    .text_color(t.muted)
+                    .child(`${q.preset} (${q.tasks.length})`),
+                )
+                .children(
+                  q.tasks.length
+                    ? q.tasks.map((it) => {
+                        const badge = it.kind === "waiting" ? `WAITING (${it.waits.join(", ")})` : KIND_LABELS[it.kind];
+                        return h_flex()
+                          .id(`rm-q-${it.id}`)
+                          .pl(8)
+                          .pr(4)
+                          .py(3)
+                          .gap(6)
+                          .rounded(4)
+                          .items_center()
+                          .cursor_pointer()
+                          .hover((s) => s.bg(t.hover))
+                          .on_mouse_down("left", stop)
+                          .on_click((_e, cx) => {
+                            this.selectTask(it.id);
+                            cx.notify();
+                          })
+                          .child(
+                            div()
+                              .flex_none()
+                              .text_size(SMALL)
+                              .font_semibold()
+                              .text_color(this.kindColor(it.kind, t, c))
+                              .child(badge),
+                          )
+                          .child(div().flex_none().text_size(SMALL).text_color(t.muted).child(it.id))
+                          .child(div().flex_1().min_w(0).truncate().text_size(SMALL).child(it.title));
+                      })
+                    : [div().pl(8).text_size(SMALL).text_color(t.dim).child("empty")],
+                ),
+            ),
+          ),
+      );
   }
 
-  taskCard(task, shorts, roleByName, t, c, stop) {
+  taskDetailBody(task, view, taskById, shorts, roleByName, t, c, stop) {
     const d = new Date();
     const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const fmt = (iso) => {
@@ -385,9 +550,15 @@ export default class TeamRoadmap extends View {
       return date === today ? hhmm : `${date} ${hhmm}`;
     };
     const kc = this.kindColor(task.kind, t, c);
-    const pill = h_flex().self_start().relative().px(8).py(2).rounded(4).items_center()
+    const pill = h_flex()
+      .self_start()
+      .relative()
+      .px(8)
+      .py(2)
+      .rounded(4)
+      .items_center()
       .child(div().absolute().left(0).top(0).size_full().rounded(4).bg(kc).opacity(0.18))
-      .child(div().relative().text_size(SMALL).font_semibold().text_color(kc).child(task.status));
+      .child(div().relative().text_size(SMALL).font_semibold().text_color(kc).child(KIND_LABELS[task.kind] ?? task.status));
     const touchedEls = [];
     task.touched.forEach((name, idx) => {
       const short = this.shortOf(name, shorts);
@@ -395,28 +566,139 @@ export default class TeamRoadmap extends View {
       if (idx > 0) touchedEls.push(div().text_size(SMALL).text_color(t.muted).child(", "));
       touchedEls.push(div().text_size(SMALL).text_color(former ? t.dim : t.foreground).child(short));
     });
-    return this.sideCard(t)
-      .child(v_flex().gap(4)
-        .child(h_flex().gap(8).items_center()
-          .child(div().flex_1().text_size(SMALL).font_semibold().text_color(t.muted).child(task.id))
-          .child(h_flex().id("rm-task-close").size(22).items_center().justify_center().rounded(4).cursor_pointer()
-            .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-            .on_mouse_down("left", stop).on_click((_e, cx) => { this.task = null; cx.notify(); }).child("×")))
-        .child(div().text_size(BIG).font_semibold().child(task.title)))
-      .child(v_flex().gap(4).child(pill)
-        .when(Boolean(task.queue), (el) => el.child(div().text_size(SMALL).text_color(t.muted).child(`Queue: ${task.queue}`))))
-      .child(v_flex().gap(4).child(this.section("Assignments", t))
-        .children(task.assignments.length
-          ? task.assignments.map((a) => div().text_size(SMALL).text_color(t.foreground)
-              .child(`${this.shortOf(a.member, shorts)}  ${a.to ? `${fmt(a.from)} → ${fmt(a.to)}` : `since ${fmt(a.from)}`}`))
-          : [div().text_size(SMALL).text_color(t.dim).child("None")]))
-      .child(v_flex().gap(4).child(this.section("Touched by", t))
-        .child(touchedEls.length ? h_flex().flex_wrap().children(touchedEls) : div().text_size(SMALL).text_color(t.dim).child("None")))
-      .when(Boolean(task.prereqs.length), (el) => el.child(div().text_size(SMALL).text_color(t.muted).child(`Needs ${task.prereqs.join(", ")}`)))
-      .child(v_flex().gap(4).child(this.section("Log", t))
-        .children(task.log.map((e) => div().text_size(SMALL).text_color(t.muted).child(`${fmt(e.at)}  ${this.shortOf(e.by, shorts)}  ${e.change}`))))
-      .child(v_flex().gap(4).child(this.section("Brief", t))
-        .child(task.brief ? TextView.markdown(`rm-brief-${task.id}`, task.brief) : div().text_size(SMALL).text_color(t.dim).child("No brief")));
+    return v_flex()
+      .gap(12)
+      .child(
+        v_flex()
+          .gap(4)
+          .child(div().text_size(SMALL).font_semibold().text_color(t.muted).child(task.id))
+          .child(div().text_size(BIG).font_semibold().child(task.title)),
+      )
+      .child(
+        v_flex()
+          .gap(4)
+          .child(pill)
+          .when(Boolean(task.queue), (el) =>
+            el.child(div().text_size(SMALL).text_color(t.muted).child(`Queue: ${task.queue}`)),
+          ),
+      )
+      .child(
+        v_flex()
+          .gap(4)
+          .child(this.section("Assignments", t))
+          .children(
+            task.assignments.length
+              ? task.assignments.map((a) =>
+                  div()
+                    .text_size(SMALL)
+                    .text_color(t.foreground)
+                    .child(`${this.shortOf(a.member, shorts)}  ${a.to ? `${fmt(a.from)} → ${fmt(a.to)}` : `since ${fmt(a.from)}`}`),
+                )
+              : [div().text_size(SMALL).text_color(t.dim).child("None")],
+          ),
+      )
+      .child(
+        v_flex()
+          .gap(4)
+          .child(this.section("Touched by", t))
+          .child(touchedEls.length ? h_flex().flex_wrap().children(touchedEls) : div().text_size(SMALL).text_color(t.dim).child("None")),
+      )
+      .child(
+        v_flex()
+          .gap(4)
+          .child(this.section("Log", t))
+          .children(
+            task.log.map((e) =>
+              div().text_size(SMALL).text_color(t.muted).child(`${fmt(e.at)}  ${this.shortOf(e.by, shorts)}  ${e.change}`),
+            ),
+          ),
+      )
+      .child(
+        v_flex()
+          .gap(4)
+          .child(this.section("Brief", t))
+          .child(task.brief ? TextView.markdown(`rm-brief-${task.id}`, task.brief) : div().text_size(SMALL).text_color(t.dim).child("No brief")),
+      );
+  }
+
+  sidePane(view, taskById, shorts, roleByName, t, c, stop) {
+    const selectedTask = this.task ? taskById.get(this.task) ?? null : null;
+    const showTask = this.tab === "task" && selectedTask !== null;
+    const tabBtn = (id, label, active, onClick) =>
+      h_flex()
+        .id(id)
+        .px(10)
+        .py(5)
+        .rounded(4)
+        .cursor_pointer()
+        .text_size(SMALL)
+        .font_semibold()
+        .when(active, (el) => el.bg(t.selected).text_color(t.foreground))
+        .when(!active, (el) => el.text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)))
+        .on_mouse_down("left", stop)
+        .on_click((_e, cx) => {
+          onClick();
+          cx.notify();
+        })
+        .child(label);
+
+    return v_flex()
+      .w(340)
+      .h_full()
+      .flex_none()
+      .border_l(1)
+      .border_color(t.border)
+      .bg(t.surface)
+      .child(
+        h_flex()
+          .flex_none()
+          .px(12)
+          .py(8)
+          .gap(6)
+          .border_b(1)
+          .border_color(t.border)
+          .bg(t.chrome)
+          .child(tabBtn("rm-tab-team", "Team & Queues", !showTask, () => { this.tab = "team"; }))
+          .when(Boolean(selectedTask), (el) =>
+            el.child(
+              h_flex()
+                .gap(4)
+                .items_center()
+                .child(tabBtn("rm-tab-task", `Task ${selectedTask.id}`, showTask, () => { this.tab = "task"; }))
+                .child(
+                  h_flex()
+                    .id("rm-tab-task-close")
+                    .size(20)
+                    .items_center()
+                    .justify_center()
+                    .rounded(4)
+                    .cursor_pointer()
+                    .text_size(SMALL)
+                    .text_color(t.muted)
+                    .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                    .on_mouse_down("left", stop)
+                    .on_click((_e, cx) => {
+                      this.task = null;
+                      this.tab = "team";
+                      cx.notify();
+                    })
+                    .child("×"),
+                ),
+            ),
+          ),
+      )
+      .child(
+        v_flex()
+          .flex_1()
+          .min_h(0)
+          .overflow_y_scrollbar()
+          .p(14)
+          .child(
+            showTask
+              ? this.taskDetailBody(selectedTask, view, taskById, shorts, roleByName, t, c, stop)
+              : this.teamQueuesBody(view, taskById, shorts, t, c, stop),
+          ),
+      );
   }
 
   render(cx) {
@@ -655,14 +937,11 @@ export default class TeamRoadmap extends View {
           .child(div().absolute().left(0).top(z(24)).w(z(W)).h(z(H)).children(els)),
       );
 
-    const activeTask = this.task ? taskById.get(this.task) ?? null : null;
-    const activeMember = this.member ? view.members.find((m) => m.name === this.member) ?? null : null;
-    const card = activeTask
-      ? this.taskCard(activeTask, shorts, roleByName, t, c, stop)
-      : activeMember
-        ? this.memberCard(activeMember, taskById, t, c, stop)
-        : null;
-    const body = h_flex().flex_1().min_h(0).child(map).when(Boolean(card), (el) => el.child(card));
+    const body = h_flex()
+      .flex_1()
+      .min_h(0)
+      .child(map)
+      .child(this.sidePane(view, taskById, shorts, roleByName, t, c, stop));
 
     return frame(header, body);
   }
