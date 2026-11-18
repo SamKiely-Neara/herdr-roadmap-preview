@@ -3,7 +3,7 @@
 
 // Columns by dependency depth; a chain keeps its row, a branch takes the next one; tasks with no
 // links at all fill a block under the chains, five to a column.
-export function layout(tasks) {
+export function layout(tasks, allTasks = tasks) {
   const mine = new Map(tasks.map((t) => [t.id, t]));
   const pre = (t) => t.prereqs.filter((p) => mine.has(p));
   const depth = (t, seen = new Set()) => {
@@ -16,7 +16,10 @@ export function layout(tasks) {
   for (const t of tasks) { t.d = null; t.r = null; }
   tasks.forEach((t) => depth(t));
   const linked = new Set();
-  for (const t of tasks) for (const p of pre(t)) { linked.add(t.id); linked.add(p); }
+  for (const t of allTasks) {
+    if (t.prereqs.length) linked.add(t.id);
+    for (const p of t.prereqs) linked.add(p);
+  }
   let rows = 0;
   const place = (t, row) => {
     t.r = row;

@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { relatedTo, toView } from "./model.js";
+import { liveByName, relatedTo, toView } from "./model.js";
 import { layout } from "./layout.js";
 
 function makeSnapshot({
+  milestones = [{ id: "M-1", title: "Setup", goal: "Foundation", created: "2026-11-18T15:00:00+11:00" }],
   tasks = [],
   members = [
     { name: "alpha-worker", preset: "worker" },
     { name: "alpha-coder", preset: "coder" },
   ],
-  schema = 1,
+  schema = 2,
 } = {}) {
   return {
     token: "1:abcdef123456",
@@ -20,6 +21,7 @@ function makeSnapshot({
     roadmap: {
       schema,
       rev: 1,
+      milestones,
       tasks,
     },
   };
@@ -30,8 +32,10 @@ function makeTask(overrides = {}) {
     id: "T-1",
     title: "Sample",
     status: "open",
-    phase: "Setup",
+    milestone: "M-1",
     prereqs: [],
+    blocker: null,
+    steps: [],
     brief: "",
     created: "2026-11-18T15:30:00+11:00",
     changed: "2026-11-18T15:30:00+11:00",
@@ -48,7 +52,11 @@ describe("toView", () => {
       tasks: [
         makeTask({ id: "T-1", status: "done" }),
         makeTask({ id: "T-2", status: "in-progress" }),
-        makeTask({ id: "T-3", status: "blocked" }),
+        makeTask({
+          id: "T-3",
+          status: "blocked",
+          blocker: { reason: "waiting on Sam", since: "2026-11-18T15:31:00+11:00", by: "alpha-lead" },
+        }),
         makeTask({ id: "T-4", status: "parked" }),
         makeTask({ id: "T-5", status: "open", prereqs: ["T-2"] }),
         makeTask({ id: "T-6", status: "open", prereqs: ["T-1"] }),
@@ -109,106 +117,127 @@ describe("toView", () => {
         }),
         makeTask({
           id: "T-2",
-          assignments: [
-            { member: "alpha-scout", from: "2026-11-18T15:06:00+11:00", to: null },
-          ],
+          assignments: [{ member: "alpha-scout", from: "2026-11-18T15:06:00+11:00", to: null }],
         }),
       ],
     });
 
     const view = toView(snap);
     expect(view.members).toEqual([
-      { name: "alpha-lead", short: "lead", role: "lead", preset: "lead", doing: [], open: [], queued: [], state: "idle" },
-      { name: "alpha-worker", short: "worker", role: "member", preset: "worker", doing: [], open: ["T-1"], queued: [], state: "idle" },
-      { name: "alpha-scout", short: "scout", role: "former", preset: null, doing: [], open: ["T-2"], queued: [], state: "idle" },
+      {
+        name: "alpha-lead",
+        short: "lead",
+        role: "lead",
+        preset: "lead",
+        doing: [],
+        open: [],
+        queued: [],
+        live: "offline",
+        drift: false,
+      },
+      {
+        name: "alpha-worker",
+        short: "worker",
+        role: "member",
+        preset: "worker",
+        doing: [],
+        open: ["T-1"],
+        queued: [],
+        live: "offline",
+        drift: false,
+      },
+      {
+        name: "alpha-scout",
+        short: "scout",
+        role: "former",
+        preset: null,
+        doing: [],
+        open: ["T-2"],
+        queued: [],
+        live: "offline",
+        drift: false,
+      },
     ]);
   });
 
-  test("groups phases in first-seen order and maps null phase to Tasks", () => {
+  test("derives milestone states, places null/unknown milestones in Unplanned, and emits all edges", () => {
     const snap = makeSnapshot({
+      milestones: [
+        { id: "M-1", title: "Done M", goal: "All done", created: "2026-11-18T15:00:00+11:00" },
+        { id: "M-2", title: "Blocked M", goal: "One blocked", created: "2026-11-18T15:01:00+11:00" },
+        { id: "M-3", title: "Planned M", goal: "None started", created: "2026-11-18T15:02:00+11:00" },
+      ],
       tasks: [
-        makeTask({ id: "T-1", phase: "Build" }),
-        makeTask({ id: "T-2", phase: null }),
-        makeTask({ id: "T-3", phase: "Build" }),
-        makeTask({ id: "T-4", phase: "Verify" }),
+        makeTask({ id: "T-1", status: "done", milestone: "M-1" }),
+        makeTask({ id: "T-2", status: "parked", milestone: "M-1" }),
+        makeTask({
+          id: "T-3",
+          status: "blocked",
+          milestone: "M-2",
+          prereqs: ["T-1"],
+          blocker: { reason: "need input", since: "2026-11-18T15:31:00+11:00", by: "alpha-lead" },
+        }),
+        makeTask({ id: "T-4", status: "open", milestone: "M-3", prereqs: ["T-3"] }),
+        makeTask({ id: "T-5", status: "open", milestone: null }),
+        makeTask({ id: "T-6", status: "open", milestone: "M-999" }),
       ],
     });
 
     const view = toView(snap);
-    expect(view.phases.map((p) => [p.title, p.tasks.map((t) => t.id)])).toEqual([
-      ["Build", ["T-1", "T-3"]],
-      ["Tasks", ["T-2"]],
-      ["Verify", ["T-4"]],
+    expect(view.milestones.map((m) => [m.id, m.title, m.state, m.done, m.total])).toEqual([
+      ["M-1", "Done M", "done", 1, 2],
+      ["M-2", "Blocked M", "active", 0, 1],
+      ["M-3", "Planned M", "planned", 0, 1],
+      [null, "Unplanned", "planned", 0, 2],
     ]);
+    expect(view.edges).toEqual([
+      { from: "T-1", to: "T-3", met: true, fromKind: "done" },
+      { from: "T-3", to: "T-4", met: false, fromKind: "blocked" },
+    ]);
+    expect(view.tasks.find((t) => t.id === "T-3")?.neededBy).toEqual(["T-4"]);
   });
 
   test("throws on unsupported roadmap schema", () => {
-    expect(() => toView(makeSnapshot({ schema: 2 }))).toThrow("Unsupported roadmap schema");
+    expect(() => toView(makeSnapshot({ schema: 1 }))).toThrow("Unsupported roadmap schema");
   });
 
-  test("maps partial status to partial kind", () => {
-    const view = toView(makeSnapshot({ tasks: [makeTask({ id: "T-1", status: "partial" })] }));
-    expect(view.tasks[0].kind).toBe("partial");
-  });
-
-  test("computes member doing, open, and state from open assignments", () => {
-    const view = toView(
-      makeSnapshot({
-        tasks: [
-          makeTask({
-            id: "T-1",
-            status: "in-progress",
-            assignments: [{ member: "alpha-worker", from: "2026-11-18T15:31:00+11:00", to: null }],
-          }),
-          makeTask({
-            id: "T-2",
-            status: "blocked",
-            assignments: [
-              { member: "alpha-worker", from: "2026-11-18T15:31:00+11:00", to: null },
-            ],
-          }),
-          makeTask({
-            id: "T-3",
-            status: "blocked",
-            assignments: [{ member: "alpha-coder", from: "2026-11-18T15:31:00+11:00", to: null }],
-          }),
-          makeTask({
-            id: "T-4",
-            status: "done",
-            assignments: [{ member: "alpha-coder", from: "2026-11-18T15:31:00+11:00", to: null }],
-          }),
-        ],
-      }),
-    );
-    const worker = view.members.find((m) => m.name === "alpha-worker");
-    const coder = view.members.find((m) => m.name === "alpha-coder");
-    expect(worker.doing).toEqual(["T-1"]);
-    expect(worker.open).toEqual(["T-1", "T-2"]);
-    expect(worker.state).toBe("working");
-    expect(coder.doing).toEqual([]);
-    expect(coder.open).toEqual(["T-3"]);
-    expect(coder.state).toBe("idle");
-  });
-
-  test("queued honours prereqs and open assignments", () => {
+  test("queues per preset include ready, waiting, and blocked rows, and empty presets stay at 0", () => {
     const view = toView(
       makeSnapshot({
         tasks: [
           makeTask({ id: "T-1", status: "open" }),
           makeTask({ id: "T-2", status: "open", queue: "worker" }),
-          makeTask({ id: "T-3", status: "partial", queue: "worker", prereqs: ["T-1"] }),
+          makeTask({ id: "T-3", status: "open", queue: "worker", prereqs: ["T-1"] }),
           makeTask({
-            id: "T-4",
             status: "open",
             queue: "worker",
             assignments: [{ member: "alpha-coder", from: "2026-11-18T15:31:00+11:00", to: null }],
           }),
-          makeTask({ id: "T-5", status: "blocked", queue: "worker" }),
+          makeTask({
+            id: "T-5",
+            status: "blocked",
+            queue: "worker",
+            blocker: { reason: "blocked queue item", since: "2026-11-18T15:31:00+11:00", by: "alpha-lead" },
+          }),
+          makeTask({ id: "T-6", status: "done", queue: "coder" }),
         ],
       }),
     );
+
     const worker = view.members.find((m) => m.name === "alpha-worker");
     expect(worker.queued).toEqual(["T-2"]);
+    expect(view.queues.map((q) => [q.preset, q.tasks.map((t) => [t.id, t.kind])])).toEqual([
+      ["lead", []],
+      [
+        "worker",
+        [
+          ["T-2", "ready"],
+          ["T-3", "waiting"],
+          ["T-5", "blocked"],
+        ],
+      ],
+      ["coder", []],
+    ]);
   });
 
   test("touched lists assignees then log authors without repeats, and relatedTo includes own queue", () => {
@@ -224,7 +253,7 @@ describe("toView", () => {
             ],
             log: [
               { at: "2026-11-18T15:30:00+11:00", by: "alpha-lead", change: "added" },
-              { at: "2026-11-18T15:31:00+11:00", by: "alpha-worker", change: "status open → in-progress" },
+              { at: "2026-11-18T15:31:00+11:00", by: "alpha-worker", change: "status open -> in-progress" },
             ],
           }),
           makeTask({ id: "T-2", status: "open", queue: "worker" }),
@@ -239,25 +268,57 @@ describe("toView", () => {
     expect(relatedTo(view, "alpha-coder")).toEqual(new Set(["T-1", "T-3"]));
   });
 
-  test("unassigned queued task sets assignee to null and returns to preset queue", () => {
+  test("detects drift when member is live working with no in-progress task", () => {
+    const live = liveByName(
+      [
+        { state: "live", address: "t1", status: "working", labels: { "agent.name": "alpha-worker" } },
+        { state: "live", address: "t2", status: "done", labels: { "agent.name": "alpha-coder" } },
+      ],
+      null,
+    );
     const view = toView(
       makeSnapshot({
         tasks: [
           makeTask({
             id: "T-1",
-            status: "partial",
-            queue: "worker",
-            assignments: [
-              { member: "alpha-worker", from: "2026-11-18T15:31:00+11:00", to: "2026-11-18T15:35:00+11:00" },
-            ],
+            status: "open",
+            assignments: [{ member: "alpha-worker", from: "2026-11-18T15:30:00+11:00", to: null }],
           }),
         ],
       }),
+      live,
     );
-    expect(view.tasks[0].assignee).toBeNull();
-    expect(view.tasks[0].owner).toBe("alpha-worker");
+    const lead = view.members.find((m) => m.name === "alpha-lead");
     const worker = view.members.find((m) => m.name === "alpha-worker");
-    expect(worker.queued).toEqual(["T-1"]);
+    const coder = view.members.find((m) => m.name === "alpha-coder");
+    expect(lead.live).toBe("offline");
+    expect(lead.drift).toBe(false);
+    expect(worker.live).toBe("working");
+    expect(worker.drift).toBe(true);
+    expect(coder.live).toBe("idle");
+    expect(coder.drift).toBe(false);
+  });
+});
+
+describe("liveByName", () => {
+  test("prefers labels agent.name, filters machine and non-live, and maps done to idle", () => {
+    const terms = [
+      { state: "live", address: "t1", name: "wrong", status: "working", labels: { "agent.name": "alpha-lead" } },
+      { state: "live", address: "t2", name: "alpha-worker", status: "done", labels: {} },
+      { state: "live", address: "t3", name: "alpha-coder", status: "blocked", labels: {} },
+      { state: "exited", address: "t4", name: "alpha-ghost", status: "working", labels: {} },
+      { state: "live", address: "mrc/t5", name: "alpha-remote", status: "working", labels: {} },
+    ];
+
+    const local = liveByName(terms, null);
+    expect([...local.entries()]).toEqual([
+      ["alpha-lead", "working"],
+      ["alpha-worker", "idle"],
+      ["alpha-coder", "blocked"],
+    ]);
+
+    const remote = liveByName(terms, "mrc");
+    expect([...remote.entries()]).toEqual([["alpha-remote", "working"]]);
   });
 });
 
@@ -275,5 +336,20 @@ describe("layout", () => {
       ["T-2", 1, 0],
       ["T-3", 0, 1],
     ]);
+  });
+
+  test("keeps cross-lane linked tasks in chain rows at depth 0 instead of loose block", () => {
+    const t1 = { id: "T-1", prereqs: [] };
+    const t2 = { id: "T-2", prereqs: ["T-1"] };
+    const t3 = { id: "T-3", prereqs: [] };
+    const all = [t1, t2, t3];
+    const lane1 = [t1, t3];
+    const lane2 = [t2];
+
+    layout(lane1, all);
+    layout(lane2, all);
+    expect([t1.d, t1.r]).toEqual([0, 0]);
+    expect([t3.d, t3.r]).toEqual([0, 1]);
+    expect([t2.d, t2.r]).toEqual([0, 0]);
   });
 });
