@@ -587,3 +587,35 @@ def test_with_roadmap_tab_adds_idempotently_and_rejects_missing_space() -> None:
     with pytest.raises(cli_mod.CliError) as exc_info:
         cli_mod.with_roadmap_tab(doc, "missing-space", None)
     assert exc_info.value.code == 1
+
+
+def test_without_roadmap_tab_removes_tab_or_empty_space_and_ignores_absent() -> None:
+    """without_roadmap_tab strips only Roadmap tabs, drops empty spaces, and returns None when absent."""
+    cli_mod = _load_cli_module()
+    agents_tab = {
+        "id": "tb1",
+        "name": "Agents",
+        "root": {"type": "row", "id": "tb1", "children": [{"type": "block", "id": "t1"}]},
+    }
+    roadmap_tab = {
+        "id": "tb2",
+        "name": "Roadmap",
+        "root": {
+            "type": "row",
+            "id": "tb2",
+            "children": [{"type": "block", "id": "p1", "content": {"mod": "team-roadmap", "props": {"team": "t"}}}],
+        },
+    }
+
+    doc_both = {"spaces": [{"id": "demo-team", "name": "demo-team", "tabs": [agents_tab, roadmap_tab]}]}
+    stripped = cli_mod.without_roadmap_tab(doc_both, "demo-team")
+    assert stripped is not None
+    assert [t["name"] for t in stripped["spaces"][0]["tabs"]] == ["Agents"]
+
+    doc_only_roadmap = {"spaces": [{"id": "demo-team", "name": "demo-team", "tabs": [roadmap_tab]}]}
+    removed_space = cli_mod.without_roadmap_tab(doc_only_roadmap, "demo-team")
+    assert removed_space is not None
+    assert removed_space["spaces"] == []
+
+    assert cli_mod.without_roadmap_tab(stripped, "demo-team") is None
+    assert cli_mod.without_roadmap_tab(doc_both, "missing-space") is None

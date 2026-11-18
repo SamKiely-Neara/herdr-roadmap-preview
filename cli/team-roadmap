@@ -707,6 +707,34 @@ def cmd_open_tab(args: argparse.Namespace) -> None:
     _edit_app_doc(lambda doc: with_roadmap_tab(doc, args.team, machine), "open-tab")
 
 
+def without_roadmap_tab(doc: dict, team: str) -> dict | None:
+    """Return doc with space <team>'s team-roadmap tabs removed, and the space too if no tab is left.
+
+    None when the space or the tab is absent (nothing to do). Pure, like with_roadmap_tab.
+    """
+    updated = copy.deepcopy(doc)
+    spaces = updated.get("spaces", [])
+    space_idx = next((i for i, s in enumerate(spaces) if s.get("id") == team), None)
+    if space_idx is None:
+        return None
+    tabs = spaces[space_idx].get("tabs", [])
+    kept = [tab for tab in tabs if not (isinstance(tab.get("root"), dict) and _has_roadmap_block(tab["root"]))]
+    if len(kept) == len(tabs):
+        return None
+    if kept:
+        spaces[space_idx]["tabs"] = kept
+    else:
+        del spaces[space_idx]
+    return updated
+
+
+def cmd_close_tab(args: argparse.Namespace) -> None:
+    """Handle the 'close-tab' subcommand."""
+    if not TEAM_RE.match(args.team):
+        raise CliError(f"invalid team name {args.team!r}: must match {TEAM_RE.pattern}")
+    _edit_app_doc(lambda doc: without_roadmap_tab(doc, args.team), "close-tab")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="team-roadmap", description="Manage per-team roadmap tasks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -759,6 +787,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_open = sub.add_parser("open-tab", help="Append a Roadmap tab to the team's Herdr space.")
     p_open.add_argument("team")
     p_open.set_defaults(func=cmd_open_tab)
+
+    p_close = sub.add_parser("close-tab", help="Remove the Roadmap tab from the team's Herdr space.")
+    p_close.add_argument("team")
+    p_close.set_defaults(func=cmd_close_tab)
 
     return parser
 
