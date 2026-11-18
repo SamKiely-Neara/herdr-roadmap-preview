@@ -566,6 +566,29 @@ export default class TeamRoadmap extends View {
       if (idx > 0) touchedEls.push(div().text_size(SMALL).text_color(t.muted).child(", "));
       touchedEls.push(div().text_size(SMALL).text_color(former ? t.dim : t.foreground).child(short));
     });
+    const milestoneObj = task.milestone ? view.milestones.find((m) => m.id === task.milestone) : null;
+    const milestoneTitle = milestoneObj ? `${milestoneObj.id} ${milestoneObj.title}` : "Unplanned";
+    const linkRow = (prefix, targetId) => {
+      const target = taskById.get(targetId);
+      if (!target) return div().text_size(SMALL).text_color(t.muted).child(targetId);
+      return h_flex()
+        .id(`rm-${prefix}-${task.id}-${target.id}`)
+        .gap(6)
+        .px(6)
+        .py(3)
+        .rounded(4)
+        .items_center()
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", stop)
+        .on_click((_e, cx) => {
+          this.selectTask(target.id);
+          cx.notify();
+        })
+        .child(div().flex_none().text_size(SMALL).font_semibold().text_color(t.muted).child(target.id))
+        .child(div().flex_1().min_w(0).truncate().text_size(SMALL).child(target.title))
+        .child(div().flex_none().text_size(SMALL).text_color(this.kindColor(target.kind, t, c)).child(target.status));
+    };
     return v_flex()
       .gap(12)
       .child(
@@ -578,9 +601,60 @@ export default class TeamRoadmap extends View {
         v_flex()
           .gap(4)
           .child(pill)
+          .child(div().text_size(SMALL).text_color(t.muted).child(`Milestone: ${milestoneTitle}`))
           .when(Boolean(task.queue), (el) =>
             el.child(div().text_size(SMALL).text_color(t.muted).child(`Queue: ${task.queue}`)),
           ),
+      )
+      .when(Boolean(task.blocker), (el) =>
+        el.child(
+          v_flex()
+            .gap(4)
+            .p(8)
+            .rounded(4)
+            .bg(t.chrome)
+            .border(1)
+            .border_color(c.blocked)
+            .child(this.section("Blocker", t))
+            .child(div().text_size(SMALL).text_color(c.blocked).child(task.blocker.reason))
+            .child(
+              div()
+                .text_size(SMALL)
+                .text_color(t.muted)
+                .child(`since ${fmt(task.blocker.since)} · by ${this.shortOf(task.blocker.by, shorts)}`),
+            ),
+        ),
+      )
+      .when(task.steps.length > 0, (el) =>
+        el.child(
+          v_flex()
+            .gap(4)
+            .child(this.section("Steps", t))
+            .children(
+              task.steps.map((s, idx) =>
+                div()
+                  .text_size(SMALL)
+                  .text_color(s.done ? t.muted : t.foreground)
+                  .child(`${idx + 1}. ${s.done ? "☑" : "☐"} ${s.text}`),
+              ),
+            ),
+        ),
+      )
+      .when(task.prereqs.length > 0, (el) =>
+        el.child(
+          v_flex()
+            .gap(4)
+            .child(this.section("Prerequisites", t))
+            .children(task.prereqs.map((pid) => linkRow("pre", pid))),
+        ),
+      )
+      .when(task.neededBy.length > 0, (el) =>
+        el.child(
+          v_flex()
+            .gap(4)
+            .child(this.section("Needed by", t))
+            .children(task.neededBy.map((nid) => linkRow("need", nid))),
+        ),
       )
       .child(
         v_flex()
