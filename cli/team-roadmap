@@ -261,10 +261,9 @@ def locked(team_dir: Path) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def members(team_dir: Path) -> list[str]:
-    """Return member names with lead first, then members[], from team.json."""
-    _, data = _read_team_json(team_dir)
-    return [data["lead"]["name"], *(entry["name"] for entry in data["members"])]
+def members(team_data: dict) -> list[str]:
+    """Member names, lead first, then members[] in team.json order."""
+    return [team_data["lead"]["name"], *(entry["name"] for entry in team_data["members"])]
 
 
 def resolve_member(team: str, name: str, known: list[str]) -> str:
@@ -325,15 +324,65 @@ def _find_task(roadmap: dict, task_id: str) -> dict:
     raise CliError(f"unknown task id {task_id}")
 
 
+def require(allowed: bool, who: str, what: str, rule: str) -> None:
+    """Raise CliError(code=3) unless allowed."""
+    if not allowed:
+        raise CliError(f"team-roadmap: {who} can't {what}: {rule}", code=3)
+
+
+def _is_lead(team_data: dict, who: str) -> bool:
+    return who == "sam" or who == team_data["lead"]["name"]
+
+
+def _member_preset(team_data: dict, who: str) -> str | None:
+    for entry in team_data["members"]:
+        if entry["name"] == who:
+            return entry["preset"]
+    return None
+
+
+def _member_presets(team_data: dict) -> set[str]:
+    return {entry["preset"] for entry in team_data["members"]}
+
+
+def _active_assignment(task: dict) -> dict | None:
+    assignments = task["assignments"]
+    return assignments[-1] if assignments and assignments[-1]["to"] is None else None
+
+
+def _pause_other_tasks(roadmap: dict, team: str, member: str, keep_id: str, who: str, ts: str) -> list[str]:
+    """Set every other in-progress task whose open assignee is `member` to partial; returns their ids."""
+    short = _short_member(team, member)
+    paused: list[str] = []
+    for other in roadmap["tasks"]:
+        if other["id"] == keep_id or other["status"] != "in-progress":
+            continue
+        active = _active_assignment(other)
+        if active is not None and active["member"] == member:
+            other["status"] = "partial"
+            other["changed"] = ts
+            other["log"].append(
+                {"at": ts, "by": who, "change": f"status in-progress → partial ({short} started {keep_id})"}
+            )
+            paused.append(other["id"])
+    return paused
+
+
 def cmd_add(args: argparse.Namespace) -> None:
     """Handle the 'add' subcommand."""
     team_dir = _team_dir(args.team)
-    known = members(team_dir)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, "add tasks", "only the lead can add tasks")
+    known = members(team_data)
     if args.status not in VALID_STATUSES:
         raise CliError(f"invalid status {args.status!r} (valid: {', '.join(VALID_STATUSES)})")
     if not args.title.strip() or "\n" in args.title or "\r" in args.title:
         raise CliError("title must be non-empty with no newline")
     assignee = resolve_member(args.team, args.assign, known) if args.assign else None
+    queue_preset = args.queue
+    if queue_preset is not None and queue_preset not in _member_presets(team_data):
+        raise CliError(f"unknown preset {queue_preset!r} (presets: {', '.join(sorted(_member_presets(team_data)))})")
     brief = _read_brief(args.brief_file)
     phase = args.phase.strip() if args.phase is not None and args.phase.strip() else None
     prereqs = args.prereq or []
@@ -360,43 +409,77 @@ def cmd_add(args: argparse.Namespace) -> None:
                 "created": ts,
                 "changed": ts,
                 "assignments": assignments,
-                "queue": None,
+                "queue": queue_preset,
                 "log": [{"at": ts, "by": who, "change": "added"}],
             }
         )
+        paused = (
+            _pause_other_tasks(roadmap, args.team, assignee, task_id, who, ts)
+            if args.status == "in-progress" and assignee
+            else []
+        )
         save(team_dir, roadmap)
+    for pid in paused:
+        print(f"paused {pid}", file=sys.stderr)
     print(task_id)
 
 
 def cmd_set_status(args: argparse.Namespace) -> None:
     """Handle the 'set-status' subcommand."""
     team_dir = _team_dir(args.team)
-    _read_team_json(team_dir)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
     if args.status not in VALID_STATUSES:
         raise CliError(f"invalid status {args.status!r} (valid: {', '.join(VALID_STATUSES)})")
     with locked(team_dir):
         roadmap = load(team_dir)
         task = _find_task(roadmap, args.id)
+        active = _active_assignment(task)
+        if args.status == "done" or task["status"] == "done":
+            require(
+                _is_lead(team_data, who),
+                who,
+                f"set {args.id} to {args.status}",
+                "only the lead moves tasks into or out of done",
+            )
+        else:
+            active_member = active["member"] if active is not None else None
+            require(
+                _is_lead(team_data, who) or who == active_member,
+                who,
+                f"set {args.id} to {args.status}",
+                "only the lead or the assignee can change status",
+            )
         old_status = task["status"]
         if old_status == args.status:
             return
         ts = now()
         task["status"] = args.status
         task["changed"] = ts
-        task["log"].append({"at": ts, "by": actor(), "change": f"status {old_status} → {args.status}"})
+        task["log"].append({"at": ts, "by": who, "change": f"status {old_status} → {args.status}"})
+        paused = (
+            _pause_other_tasks(roadmap, args.team, active["member"], args.id, who, ts)
+            if args.status == "in-progress" and active is not None
+            else []
+        )
         save(team_dir, roadmap)
+    for pid in paused:
+        print(f"paused {pid}", file=sys.stderr)
 
 
 def cmd_assign(args: argparse.Namespace) -> None:
     """Handle the 'assign' subcommand."""
     team_dir = _team_dir(args.team)
-    known = members(team_dir)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"assign {args.id}", "only the lead can assign tasks")
+    known = members(team_data)
     target = None if args.member == "none" else resolve_member(args.team, args.member, known)
     with locked(team_dir):
         roadmap = load(team_dir)
         task = _find_task(roadmap, args.id)
         assignments = task["assignments"]
-        active = assignments[-1] if assignments and assignments[-1]["to"] is None else None
+        active = _active_assignment(task)
         if target is None:
             if active is None:
                 return
@@ -415,13 +498,20 @@ def cmd_assign(args: argparse.Namespace) -> None:
         assignments.append({"member": target, "from": ts, "to": None})
         task["changed"] = ts
         task["log"].append({"at": ts, "by": actor(), "change": f"assigned {_short_member(args.team, target)}"})
+        paused = (
+            _pause_other_tasks(roadmap, args.team, target, args.id, who, ts) if task["status"] == "in-progress" else []
+        )
         save(team_dir, roadmap)
+    for pid in paused:
+        print(f"paused {pid}", file=sys.stderr)
 
 
 def cmd_set_brief(args: argparse.Namespace) -> None:
     """Handle the 'set-brief' subcommand."""
     team_dir = _team_dir(args.team)
-    _read_team_json(team_dir)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"edit {args.id} brief", "only the lead can edit briefs")
     brief = _read_brief(args.brief_file)
     with locked(team_dir):
         roadmap = load(team_dir)
@@ -431,8 +521,91 @@ def cmd_set_brief(args: argparse.Namespace) -> None:
         ts = now()
         task["brief"] = brief
         task["changed"] = ts
-        task["log"].append({"at": ts, "by": actor(), "change": "brief changed"})
+        task["log"].append({"at": ts, "by": who, "change": "brief changed"})
         save(team_dir, roadmap)
+
+
+def cmd_queue(args: argparse.Namespace) -> None:
+    """Handle the 'queue' subcommand."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"queue {args.id}", "only the lead can queue tasks")
+    target = None if args.preset == "none" else args.preset
+    if target is not None and target not in _member_presets(team_data):
+        raise CliError(f"unknown preset {target!r} (presets: {', '.join(sorted(_member_presets(team_data)))})")
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        if task["queue"] == target:
+            return
+        ts = now()
+        task["queue"] = target
+        task["changed"] = ts
+        change = "unqueued" if target is None else f"queued for {target}"
+        task["log"].append({"at": ts, "by": who, "change": change})
+        save(team_dir, roadmap)
+
+
+def _claim_block_reason(team: str, task: dict, done_ids: set[str]) -> str | None:
+    active = _active_assignment(task)
+    if active is not None:
+        return f"{task['id']} is assigned to {_short_member(team, active['member'])}"
+    if task["status"] not in ("open", "partial"):
+        return f"{task['id']} is {task['status']}"
+    for prereq in task["prereqs"]:
+        if prereq not in done_ids:
+            return f"{task['id']} waits for {prereq}"
+    return None
+
+
+def cmd_claim(args: argparse.Namespace) -> None:
+    """Handle the 'claim' subcommand."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    caller_preset = _member_preset(team_data, who)
+    require(
+        caller_preset is not None,
+        who,
+        f"claim {args.id or 'a task'}",
+        "only team members can claim queued tasks",
+    )
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        done_ids = {t["id"] for t in roadmap["tasks"] if t["status"] == "done"}
+        if args.id is not None:
+            task = _find_task(roadmap, args.id)
+            require(
+                task["queue"] == caller_preset,
+                who,
+                f"claim {args.id}",
+                f"task is in {task['queue'] or 'no'} queue, not {caller_preset}",
+            )
+            reason = _claim_block_reason(args.team, task, done_ids)
+            if reason is not None:
+                raise CliError(reason)
+        else:
+            task = next(
+                (
+                    t
+                    for t in roadmap["tasks"]
+                    if t["queue"] == caller_preset and _claim_block_reason(args.team, t, done_ids) is None
+                ),
+                None,
+            )
+            if task is None:
+                raise CliError(f"nothing to claim in the {caller_preset} queue", code=4)
+        ts = now()
+        task["assignments"].append({"member": who, "from": ts, "to": None})
+        task["status"] = "in-progress"
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": who, "change": f"claimed from the {caller_preset} queue"})
+        paused = _pause_other_tasks(roadmap, args.team, who, task["id"], who, ts)
+        save(team_dir, roadmap)
+    for pid in paused:
+        print(f"paused {pid}", file=sys.stderr)
+    print(task["id"])
 
 
 def cmd_snapshot(args: argparse.Namespace) -> None:
@@ -454,6 +627,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--prereq", nargs="+", action="extend", default=[])
     p_add.add_argument("--assign", default=None)
     p_add.add_argument("--status", default="open")
+    p_add.add_argument("--queue", default=None)
     p_add.set_defaults(func=cmd_add)
 
     p_status = sub.add_parser("set-status", help="Update a task's status.")
@@ -473,6 +647,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("id")
     p_brief.add_argument("--brief-file", required=True)
     p_brief.set_defaults(func=cmd_set_brief)
+
+    p_queue = sub.add_parser("queue", help="Assign or clear a task's role queue.")
+    p_queue.add_argument("team")
+    p_queue.add_argument("id")
+    p_queue.add_argument("preset")
+    p_queue.set_defaults(func=cmd_queue)
+
+    p_claim = sub.add_parser("claim", help="Claim a queued task for the calling member.")
+    p_claim.add_argument("team")
+    p_claim.add_argument("id", nargs="?", default=None)
+    p_claim.set_defaults(func=cmd_claim)
 
     p_snap = sub.add_parser("snapshot", help="Print a JSON snapshot for the mod.")
     p_snap.add_argument("team")

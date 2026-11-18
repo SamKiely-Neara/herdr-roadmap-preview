@@ -397,3 +397,145 @@ def test_partial_status_and_log_entries(team_home: Path, tmp_path: Path) -> None
         (f"{TEAM}-lead", "unassigned worker"),
         (f"{TEAM}-lead", "brief changed"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("actor_name", "command", "expected_code"),
+    [
+        (f"{TEAM}-lead", ("add", TEAM, "--title", "Lead add"), 0),
+        (f"{TEAM}-worker", ("add", TEAM, "--title", "Worker add"), 3),
+        (f"{TEAM}-worker", ("set-status", TEAM, "T-1", "done"), 3),
+        (f"{TEAM}-lead", ("set-status", TEAM, "T-1", "done"), 0),
+        (f"{TEAM}-worker", ("set-status", TEAM, "T-1", "blocked"), 0),
+        (f"{TEAM}-worker", ("set-status", TEAM, "T-2", "blocked"), 3),
+        (None, ("add", TEAM, "--title", "Sam add"), 0),
+        (None, ("set-status", TEAM, "T-1", "done"), 0),
+        (None, ("assign", TEAM, "T-2", "worker"), 0),
+        ("orchestrator", ("add", TEAM, "--title", "Orch add"), 3),
+        (f"{TEAM}-lead", ("claim", TEAM), 3),
+    ],
+    ids=[
+        "lead-add",
+        "worker-add-refused",
+        "worker-done-refused",
+        "lead-done",
+        "worker-blocked-own",
+        "worker-blocked-other-refused",
+        "sam-add",
+        "sam-done",
+        "sam-assign",
+        "orchestrator-add-refused",
+        "lead-claim-refused",
+    ],
+)
+def test_permission_matrix(
+    team_home: Path,
+    actor_name: str | None,
+    command: tuple[str, ...],
+    expected_code: int,
+) -> None:
+    """Role permissions enforce exit 3 and leave roadmap.json byte-identical on refusal."""
+    assert _run(team_home, "add", TEAM, "--title", "Worker task", "--assign", "worker").returncode == 0
+    assert _run(team_home, "add", TEAM, "--title", "Coder task", "--assign", "coder").returncode == 0
+    roadmap_path = team_home / TEAM / "roadmap.json"
+    before_bytes = roadmap_path.read_bytes()
+
+    res = _run(team_home, *command, agent_name=actor_name)
+    assert res.returncode == expected_code, res.stderr
+    if expected_code == 3:
+        assert res.stderr.startswith("team-roadmap: ")
+        assert roadmap_path.read_bytes() == before_bytes
+
+
+def test_claim_queue_ordering_errors_and_concurrency(team_home: Path) -> None:
+    """claim handles ready selection, prereq skipping, wrong queue, assigned tasks, empty queue, and races."""
+    assert _run(team_home, "add", TEAM, "--title", "Done prereq", "--status", "done").returncode == 0
+    assert _run(team_home, "add", TEAM, "--title", "Open blocker").returncode == 0
+    assert (
+        _run(team_home, "add", TEAM, "--title", "Waiting queued", "--prereq", "T-2", "--queue", "worker").returncode
+        == 0
+    )
+    assert (
+        _run(team_home, "add", TEAM, "--title", "Ready queued", "--prereq", "T-1", "--queue", "worker").returncode == 0
+    )
+
+    assert _run(team_home, "claim", TEAM, "T-4", agent_name=f"{TEAM}-coder").returncode == 3
+    res = _run(team_home, "claim", TEAM, agent_name=f"{TEAM}-worker")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "T-4"
+
+    task4 = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][3]
+    assert task4["status"] == "in-progress"
+    assert task4["queue"] == "worker"
+    assert task4["assignments"][-1]["member"] == f"{TEAM}-worker"
+    assert task4["log"][-1]["change"] == "claimed from the worker queue"
+
+    assert _run(team_home, "claim", TEAM, "T-4", agent_name=f"{TEAM}-worker").returncode == 2
+    assert _run(team_home, "claim", TEAM, agent_name=f"{TEAM}-worker").returncode == 4
+
+    assert _run(team_home, "add", TEAM, "--title", "Race task", "--queue", "worker").returncode == 0
+
+    def race_claim(_: int) -> int:
+        return _run(team_home, "claim", TEAM, "T-5", agent_name=f"{TEAM}-worker").returncode
+
+    with futures.ThreadPoolExecutor(max_workers=2) as pool:
+        codes = list(pool.map(race_claim, range(2)))
+    assert sorted(codes) == [0, 2]
+
+
+def test_queue_unknown_preset_and_assign_none_returns_to_queue(team_home: Path) -> None:
+    """queue rejects unknown presets with exit 2; assign none returns a claimed task to its queue."""
+    assert _run(team_home, "add", TEAM, "--title", "Queued task", "--queue", "worker").returncode == 0
+    assert _run(team_home, "queue", TEAM, "T-1", "unknown").returncode == 2
+    res_lead = _run(team_home, "queue", TEAM, "T-1", "lead")
+    assert res_lead.returncode == 2
+    assert "unknown preset 'lead'" in res_lead.stderr
+    assert _run(team_home, "claim", TEAM, agent_name=f"{TEAM}-worker").returncode == 0
+    assert _run(team_home, "assign", TEAM, "T-1", "none").returncode == 0
+    assert _run(team_home, "set-status", TEAM, "T-1", "open").returncode == 0
+
+    res = _run(team_home, "claim", TEAM, agent_name=f"{TEAM}-worker")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "T-1"
+
+
+def test_only_lead_reopens_done_and_starting_in_progress_pauses_other(team_home: Path) -> None:
+    """Only the lead moves tasks out of done, and starting in-progress pauses the member's other active task."""
+    assert _run(team_home, "add", TEAM, "--title", "Task 1", "--assign", "worker").returncode == 0
+    assert _run(team_home, "add", TEAM, "--title", "Task 2", "--assign", "worker").returncode == 0
+    assert _run(team_home, "add", TEAM, "--title", "Task 3", "--queue", "worker").returncode == 0
+    assert (
+        _run(team_home, "add", TEAM, "--title", "Task 4", "--assign", "coder", "--status", "in-progress").returncode
+        == 0
+    )
+    assert _run(team_home, "set-status", TEAM, "T-1", "done").returncode == 0
+
+    roadmap_path = team_home / TEAM / "roadmap.json"
+    before_bytes = roadmap_path.read_bytes()
+    refused = _run(team_home, "set-status", TEAM, "T-1", "open", agent_name=f"{TEAM}-worker")
+    assert refused.returncode == 3
+    assert roadmap_path.read_bytes() == before_bytes
+    assert _run(team_home, "set-status", TEAM, "T-1", "open").returncode == 0
+
+    assert _run(team_home, "set-status", TEAM, "T-1", "in-progress", agent_name=f"{TEAM}-worker").returncode == 0
+    res_start = _run(team_home, "set-status", TEAM, "T-2", "in-progress", agent_name=f"{TEAM}-worker")
+    assert res_start.returncode == 0, res_start.stderr
+    assert "paused T-1" in res_start.stderr.splitlines()
+
+    tasks = {t["id"]: t for t in json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"]}
+    assert tasks["T-1"]["status"] == "partial"
+    assert tasks["T-1"]["log"][-1]["change"] == "status in-progress → partial (worker started T-2)"
+    assert tasks["T-2"]["status"] == "in-progress"
+    assert tasks["T-4"]["status"] == "in-progress"
+
+    res_claim = _run(team_home, "claim", TEAM, agent_name=f"{TEAM}-worker")
+    assert res_claim.returncode == 0, res_claim.stderr
+    assert "paused T-2" in res_claim.stderr.splitlines()
+
+    res_add = _run(team_home, "add", TEAM, "--title", "Task 5", "--status", "in-progress", "--assign", "coder")
+    assert res_add.returncode == 0, res_add.stderr
+    assert "paused T-4" in res_add.stderr.splitlines()
+
+    res_assign = _run(team_home, "assign", TEAM, "T-3", "coder")
+    assert res_assign.returncode == 0, res_assign.stderr
+    assert "paused T-5" in res_assign.stderr.splitlines()
