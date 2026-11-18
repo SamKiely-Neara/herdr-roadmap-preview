@@ -570,10 +570,10 @@ def _pause_other_tasks(roadmap: dict, team: str, member: str, keep_id: str, who:
     return paused
 
 
-def _one_line_arg(value: str, field: str, *, max_len: int | None = None) -> str:
+def _one_line_arg(value: str, field: str, *, max_len: int | None = None, allow_empty: bool = False) -> str:
     stripped = value.strip()
-    if not stripped or "\n" in value or "\r" in value:
-        raise CliError(f"{field} must be non-empty with no newline")
+    if "\n" in value or "\r" in value or (not allow_empty and not stripped):
+        raise CliError(f"{field} must be non-empty with no newline" if not allow_empty else f"{field} must be one line with no newline")
     if max_len is not None and len(stripped) > max_len:
         raise CliError(f"{field} must be <= {max_len} chars (got {len(stripped)})")
     return stripped
@@ -977,6 +977,214 @@ def cmd_close_tab(args: argparse.Namespace) -> None:
     _edit_app_doc(lambda doc: without_roadmap_tab(doc, args.team), "close-tab")
 
 
+def _find_milestone(roadmap: dict, ms_id: str) -> dict:
+    for ms in roadmap["milestones"]:
+        if ms["id"] == ms_id:
+            return ms
+    raise CliError(f"unknown milestone {ms_id}")
+
+
+
+def cmd_milestone_add(args: argparse.Namespace) -> None:
+    """Handle 'milestone add'."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, "add milestones", "only the lead can add milestones")
+    title = _one_line_arg(args.title, "title", max_len=MAX_TITLE)
+    goal = _one_line_arg(args.goal, "goal", allow_empty=True)
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        max_n = max((int(m["id"].split("-")[1]) for m in roadmap["milestones"]), default=0)
+        ms_id = f"M-{max_n + 1}"
+        roadmap["milestones"].append({"id": ms_id, "title": title, "goal": goal, "created": now()})
+        save(team_dir, roadmap)
+    print(ms_id)
+
+
+def cmd_milestone_set(args: argparse.Namespace) -> None:
+    """Handle 'milestone set'."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"edit milestone {args.id}", "only the lead can edit milestones")
+    title = _one_line_arg(args.title, "title", max_len=MAX_TITLE) if args.title is not None else None
+    goal = _one_line_arg(args.goal, "goal", allow_empty=True) if args.goal is not None else None
+    if title is None and goal is None:
+        return
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        ms = _find_milestone(roadmap, args.id)
+        changed = False
+        if title is not None and ms["title"] != title:
+            ms["title"] = title
+            changed = True
+        if goal is not None and ms["goal"] != goal:
+            ms["goal"] = goal
+            changed = True
+        if changed:
+            save(team_dir, roadmap)
+
+
+def cmd_milestone_move(args: argparse.Namespace) -> None:
+    """Handle 'milestone move'."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"move milestone {args.id}", "only the lead can move milestones")
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        milestones = roadmap["milestones"]
+        ms = _find_milestone(roadmap, args.id)
+        if args.before is not None:
+            _find_milestone(roadmap, args.before)
+            if args.before == args.id:
+                return
+            new_order = [m for m in milestones if m["id"] != args.id]
+            idx = next(i for i, m in enumerate(new_order) if m["id"] == args.before)
+            new_order.insert(idx, ms)
+        else:
+            new_order = [m for m in milestones if m["id"] != args.id]
+            new_order.append(ms)
+        if [m["id"] for m in new_order] == [m["id"] for m in milestones]:
+            return
+        roadmap["milestones"] = new_order
+        save(team_dir, roadmap)
+
+
+def cmd_set(args: argparse.Namespace) -> None:
+    """Handle 'set' to edit a task's title and/or milestone."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"edit {args.id}", "only the lead can edit tasks")
+    title = _one_line_arg(args.title, "title", max_len=MAX_TITLE) if args.title is not None else None
+    if title is None and args.milestone is None:
+        return
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        changes: list[str] = []
+        if title is not None and task["title"] != title:
+            task["title"] = title
+            changes.append(f"title → {title}")
+        if args.milestone is not None:
+            target_ms = None if args.milestone == "none" else args.milestone
+            if target_ms is not None:
+                _find_milestone(roadmap, target_ms)
+            if task["milestone"] != target_ms:
+                task["milestone"] = target_ms
+                changes.append(f"milestone → {target_ms or 'none'}")
+        if not changes:
+            return
+        ts = now()
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": who, "change": "; ".join(changes)})
+        save(team_dir, roadmap)
+
+
+def cmd_link(args: argparse.Namespace) -> None:
+    """Handle 'link' to add a prerequisite edge while rejecting cycles."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"link {args.id}", "only the lead can link tasks")
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        _find_task(roadmap, args.needs)
+        if args.id == args.needs:
+            raise CliError(f"prereq cycle: {args.id} -> {args.id}")
+        if args.needs in task["prereqs"]:
+            return
+        task["prereqs"].append(args.needs)
+        cycle = _find_cycle(roadmap["tasks"])
+        if cycle is not None:
+            raise CliError(f"prereq cycle: {' -> '.join(cycle)}")
+        ts = now()
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": who, "change": f"linked {args.needs}"})
+        save(team_dir, roadmap)
+
+
+def cmd_unlink(args: argparse.Namespace) -> None:
+    """Handle 'unlink' to remove a prerequisite edge."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, f"unlink {args.id}", "only the lead can unlink tasks")
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        if args.needs not in task["prereqs"]:
+            return
+        task["prereqs"] = [p for p in task["prereqs"] if p != args.needs]
+        ts = now()
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": who, "change": f"unlinked {args.needs}"})
+        save(team_dir, roadmap)
+
+
+def _require_step_editor(team_data: dict, who: str, task: dict, what: str) -> None:
+    active = _active_assignment(task)
+    active_member = active["member"] if active is not None else None
+    require(
+        _is_lead(team_data, who) or who == active_member,
+        who,
+        what,
+        "only the lead or the open assignee can edit steps",
+    )
+
+
+def cmd_step_add(args: argparse.Namespace) -> None:
+    """Handle 'step add'."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    text = _one_line_arg(args.text, "step text")
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        _require_step_editor(team_data, who, task, f"add step on {args.id}")
+        task["steps"].append({"text": text, "done": False})
+        ts = now()
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": who, "change": f"step added: {text}"})
+        save(team_dir, roadmap)
+
+
+def cmd_step_edit(args: argparse.Namespace) -> None:
+    """Handle 'step done|undo|rm' (1-based index)."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        _require_step_editor(team_data, who, task, f"{args.step_cmd} step on {args.id}")
+        steps = task["steps"]
+        if args.n < 1 or args.n > len(steps):
+            raise CliError(f"step index {args.n} out of range (1..{len(steps)})")
+        idx = args.n - 1
+        if args.step_cmd == "done":
+            if steps[idx]["done"]:
+                return
+            steps[idx]["done"] = True
+            change = f"step {args.n} done"
+        elif args.step_cmd == "undo":
+            if not steps[idx]["done"]:
+                return
+            steps[idx]["done"] = False
+            change = f"step {args.n} undone"
+        else:
+            steps.pop(idx)
+            change = f"step {args.n} removed"
+        ts = now()
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": who, "change": change})
+        save(team_dir, roadmap)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="team-roadmap", description="Manage per-team roadmap tasks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1036,6 +1244,62 @@ def _build_parser() -> argparse.ArgumentParser:
     p_close = sub.add_parser("close-tab", help="Remove the Roadmap tab from the team's Herdr space.")
     p_close.add_argument("team")
     p_close.set_defaults(func=cmd_close_tab)
+
+    p_ms = sub.add_parser("milestone", help="Manage milestones.")
+    ms_sub = p_ms.add_subparsers(dest="ms_cmd", required=True)
+    p_ms_add = ms_sub.add_parser("add", help="Add a milestone.")
+    p_ms_add.add_argument("team")
+    p_ms_add.add_argument("--title", required=True)
+    p_ms_add.add_argument("--goal", default="")
+    p_ms_add.set_defaults(func=cmd_milestone_add)
+
+    p_ms_set = ms_sub.add_parser("set", help="Edit a milestone's title or goal.")
+    p_ms_set.add_argument("team")
+    p_ms_set.add_argument("id")
+    p_ms_set.add_argument("--title", default=None)
+    p_ms_set.add_argument("--goal", default=None)
+    p_ms_set.set_defaults(func=cmd_milestone_set)
+
+    p_ms_move = ms_sub.add_parser("move", help="Reorder a milestone.")
+    p_ms_move.add_argument("team")
+    p_ms_move.add_argument("id")
+    ms_move_grp = p_ms_move.add_mutually_exclusive_group(required=True)
+    ms_move_grp.add_argument("--before", default=None)
+    ms_move_grp.add_argument("--last", action="store_true")
+    p_ms_move.set_defaults(func=cmd_milestone_move)
+
+    p_set = sub.add_parser("set", help="Edit a task's title or milestone.")
+    p_set.add_argument("team")
+    p_set.add_argument("id")
+    p_set.add_argument("--title", default=None)
+    p_set.add_argument("--milestone", default=None)
+    p_set.set_defaults(func=cmd_set)
+
+    p_link = sub.add_parser("link", help="Add a prerequisite to a task.")
+    p_link.add_argument("team")
+    p_link.add_argument("id")
+    p_link.add_argument("--needs", required=True)
+    p_link.set_defaults(func=cmd_link)
+
+    p_unlink = sub.add_parser("unlink", help="Remove a prerequisite from a task.")
+    p_unlink.add_argument("team")
+    p_unlink.add_argument("id")
+    p_unlink.add_argument("--needs", required=True)
+    p_unlink.set_defaults(func=cmd_unlink)
+
+    p_step = sub.add_parser("step", help="Manage task checklist steps.")
+    step_sub = p_step.add_subparsers(dest="step_cmd", required=True)
+    p_step_add = step_sub.add_parser("add", help="Append a checklist step.")
+    p_step_add.add_argument("team")
+    p_step_add.add_argument("id")
+    p_step_add.add_argument("text")
+    p_step_add.set_defaults(func=cmd_step_add)
+    for step_action in ("done", "undo", "rm"):
+        p_step_act = step_sub.add_parser(step_action, help=f"Mark or remove step <n> ({step_action}).")
+        p_step_act.add_argument("team")
+        p_step_act.add_argument("id")
+        p_step_act.add_argument("n", type=int)
+        p_step_act.set_defaults(func=cmd_step_edit)
 
     return parser
 

@@ -837,3 +837,82 @@ def test_real_v1_fixture_migration(
     reloaded = cli_mod.load(team_dir)
     assert reloaded["schema"] == 2
     assert len(reloaded["tasks"]) == expected_tasks
+
+def test_milestone_add_set_move_and_permissions(team_home: Path) -> None:
+    """milestone add/set/move manage milestone order and enforce lead-only permissions."""
+    assert _run(team_home, "milestone", "add", TEAM, "--title", "M1", agent_name=f"{TEAM}-worker").returncode == 3
+
+    m1 = _run(team_home, "milestone", "add", TEAM, "--title", "First", "--goal", "Goal 1")
+    m2 = _run(team_home, "milestone", "add", TEAM, "--title", "Second")
+    m3 = _run(team_home, "milestone", "add", TEAM, "--title", "Third")
+    assert [m1.stdout.strip(), m2.stdout.strip(), m3.stdout.strip()] == ["M-1", "M-2", "M-3"]
+
+    assert (
+        _run(team_home, "milestone", "set", TEAM, "M-2", "--title", "Second edited", "--goal", "Goal 2").returncode == 0
+    )
+    assert _run(team_home, "milestone", "move", TEAM, "M-3", "--before", "M-1").returncode == 0
+    assert _run(team_home, "milestone", "move", TEAM, "M-1", "--last").returncode == 0
+
+    milestones = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["milestones"]
+    assert [m["id"] for m in milestones] == ["M-3", "M-2", "M-1"]
+    assert milestones[1]["title"] == "Second edited"
+    assert milestones[1]["goal"] == "Goal 2"
+
+
+def test_set_and_link_cycle_detection(team_home: Path) -> None:
+    """set edits title/milestone; link rejects 2-cycles and 3-cycles with exit 2 and leaves file unchanged."""
+    _run(team_home, "milestone", "add", TEAM, "--title", "Phase 1")
+    _run(team_home, "add", TEAM, "--title", "Task A")
+    _run(team_home, "add", TEAM, "--title", "Task B")
+    _run(team_home, "add", TEAM, "--title", "Task C")
+
+    assert _run(team_home, "set", TEAM, "T-1", "--title", "Task A updated", "--milestone", "M-1").returncode == 0
+    assert json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][0]["milestone"] == "M-1"
+    assert _run(team_home, "set", TEAM, "T-1", "--milestone", "none").returncode == 0
+    assert json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][0]["milestone"] is None
+    assert _run(team_home, "set", TEAM, "T-1", "--title", "x" * 81).returncode == 2
+
+    assert _run(team_home, "link", TEAM, "T-2", "--needs", "T-1").returncode == 0
+    # Re-link is a no-op
+    rev_before = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["rev"]
+    assert _run(team_home, "link", TEAM, "T-2", "--needs", "T-1").returncode == 0
+    assert json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["rev"] == rev_before
+
+    # 2-cycle: T-1 -> T-2 -> T-1
+    roadmap_path = team_home / TEAM / "roadmap.json"
+    raw_before = roadmap_path.read_bytes()
+    c2 = _run(team_home, "link", TEAM, "T-1", "--needs", "T-2")
+    assert c2.returncode == 2
+    assert "T-1" in c2.stderr and "T-2" in c2.stderr
+    assert roadmap_path.read_bytes() == raw_before
+
+    # 3-cycle: T-3 needs T-2, then T-1 needs T-3
+    assert _run(team_home, "link", TEAM, "T-3", "--needs", "T-2").returncode == 0
+    raw_before_3 = roadmap_path.read_bytes()
+    c3 = _run(team_home, "link", TEAM, "T-1", "--needs", "T-3")
+    assert c3.returncode == 2
+    assert "T-1" in c3.stderr and "T-2" in c3.stderr and "T-3" in c3.stderr
+    assert roadmap_path.read_bytes() == raw_before_3
+
+    assert _run(team_home, "unlink", TEAM, "T-2", "--needs", "T-1").returncode == 0
+    t2 = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][1]
+    assert t2["prereqs"] == []
+
+
+def test_steps_crud_permissions_and_bounds(team_home: Path) -> None:
+    """step add/done/undo/rm use 1-based indexing, allow assignee, refuse others (exit 3), and reject OOB (exit 2)."""
+    _run(team_home, "add", TEAM, "--title", "With steps", "--assign", "worker")
+    assert _run(team_home, "step", "add", TEAM, "T-1", "First step", agent_name=f"{TEAM}-worker").returncode == 0
+    assert _run(team_home, "step", "add", TEAM, "T-1", "Second step").returncode == 0
+
+    assert _run(team_home, "step", "done", TEAM, "T-1", "1", agent_name=f"{TEAM}-coder").returncode == 3
+    assert _run(team_home, "step", "done", TEAM, "T-1", "0", agent_name=f"{TEAM}-worker").returncode == 2
+    assert _run(team_home, "step", "done", TEAM, "T-1", "3", agent_name=f"{TEAM}-worker").returncode == 2
+
+    assert _run(team_home, "step", "done", TEAM, "T-1", "1", agent_name=f"{TEAM}-worker").returncode == 0
+    assert _run(team_home, "step", "undo", TEAM, "T-1", "1", agent_name=f"{TEAM}-worker").returncode == 0
+    assert _run(team_home, "step", "done", TEAM, "T-1", "2", agent_name=f"{TEAM}-worker").returncode == 0
+    assert _run(team_home, "step", "rm", TEAM, "T-1", "1", agent_name=f"{TEAM}-worker").returncode == 0
+
+    steps = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][0]["steps"]
+    assert steps == [{"text": "Second step", "done": True}]
