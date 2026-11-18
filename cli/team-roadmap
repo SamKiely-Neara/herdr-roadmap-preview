@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""Manage per-team roadmap.json files and emit snapshots for the Herdr mod."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+
+TEAM_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,16}$")
+TASK_ID_RE = re.compile(r"^T-[1-9][0-9]*$")
+MEMBER_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+VALID_STATUSES = ("open", "in-progress", "partial", "blocked", "done", "parked")
+PRESET_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+TOP_KEYS = frozenset({"schema", "rev", "tasks"})
+TASK_KEYS = frozenset(
+    {"id", "title", "status", "phase", "prereqs", "brief", "created", "changed", "assignments", "queue", "log"}
+)
+ASSIGNMENT_KEYS = frozenset({"member", "from", "to"})
+LOG_KEYS = frozenset({"at", "by", "change"})
+
+
+class CliError(Exception):
+    """Error raised for invalid CLI arguments or missing targets."""
+
+    def __init__(self, message: str, code: int = 2) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+class SchemaError(Exception):
+    """Error raised on roadmap or team schema violation."""
+
+    def __init__(self, message: str, filename: str = "roadmap.json") -> None:
+        super().__init__(message)
+        self.message = message
+        self.filename = filename
+
+
+def _empty_roadmap() -> dict:
+    return {"schema": 1, "rev": 0, "tasks": []}
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _parse_iso(value: object, path: str) -> datetime.datetime:
+    if not isinstance(value, str) or not value:
+        raise SchemaError(f"{path}: must be ISO 8601 timestamp string")
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise SchemaError(f"{path}: invalid ISO 8601 timestamp ({exc})") from exc
+    if parsed.tzinfo is None:
+        raise SchemaError(f"{path}: timestamp must include UTC offset")
+    return parsed
+
+
+def validate_roadmap(roadmap: object) -> None:
+    """Validate stored roadmap.json. Raises SchemaError('<path>: <reason>') on first violation.
+
+    Rules:
+        top level: dict with exactly schema, rev, tasks
+        schema: 1 (int, not bool)
+        rev: int >= 1 in a stored file
+        tasks[i]: dict with exactly id, title, status, phase, prereqs, brief, created, changed, assignments, queue, log
+        id: matches ^T-[1-9][0-9]*$, unique across tasks
+        title: non-empty str, no newline
+        status: one of open, in-progress, partial, blocked, done, parked
+        phase: non-empty str or null
+        prereqs: list of unique ids of tasks earlier in the list
+        brief: str
+        created, changed: ISO 8601 with UTC offset; changed >= created
+        assignments[j]: dict with exactly member, from, to; member matches ^[a-z0-9][a-z0-9-]*$;
+            from timestamp; to timestamp >= from or null
+        assignments: from non-decreasing; at most one to: null, only on the last entry
+        queue: preset name matching ^[a-z0-9][a-z0-9-]*$ or null
+        log: non-empty list of {at, by, change}; at non-decreasing; by matches the member regex;
+            change a non-empty str with no newline
+    """
+    if not isinstance(roadmap, dict) or set(roadmap.keys()) != TOP_KEYS:
+        raise SchemaError("top level: must be dict with exactly schema, rev, tasks")
+    if not _is_int(roadmap["schema"]) or roadmap["schema"] != 1:
+        raise SchemaError("schema: must be 1")
+    if not _is_int(roadmap["rev"]) or roadmap["rev"] < 1:
+        raise SchemaError("rev: must be int >= 1")
+    tasks = roadmap["tasks"]
+    if not isinstance(tasks, list):
+        raise SchemaError("tasks: must be a list")
+
+    earlier_ids: set[str] = set()
+    for idx, task in enumerate(tasks):
+        tp = f"tasks[{idx}]"
+        if not isinstance(task, dict) or set(task.keys()) != TASK_KEYS:
+            raise SchemaError(f"{tp}: must be dict with exact task keys")
+        task_id = task["id"]
+        if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
+            raise SchemaError(f"{tp}.id: must match ^T-[1-9][0-9]*$")
+        if task_id in earlier_ids:
+            raise SchemaError(f"{tp}.id: duplicate id {task_id}")
+
+        title = task["title"]
+        if not isinstance(title, str) or not title.strip() or "\n" in title or "\r" in title:
+            raise SchemaError(f"{tp}.title: must be non-empty str with no newline")
+        if task["status"] not in VALID_STATUSES:
+            raise SchemaError(f"{tp}.status: invalid status {task['status']!r}")
+        phase = task["phase"]
+        if phase is not None and (not isinstance(phase, str) or not phase.strip()):
+            raise SchemaError(f"{tp}.phase: must be non-empty str or null")
+
+        prereqs = task["prereqs"]
+        if not isinstance(prereqs, list):
+            raise SchemaError(f"{tp}.prereqs: must be a list")
+        seen_prereqs: set[str] = set()
+        for p_idx, prereq in enumerate(prereqs):
+            if not isinstance(prereq, str) or prereq not in earlier_ids:
+                raise SchemaError(f"{tp}.prereqs[{p_idx}]: must reference an earlier task id")
+            if prereq in seen_prereqs:
+                raise SchemaError(f"{tp}.prereqs[{p_idx}]: duplicate prereq {prereq}")
+            seen_prereqs.add(prereq)
+
+        if not isinstance(task["brief"], str):
+            raise SchemaError(f"{tp}.brief: must be str")
+        created_dt = _parse_iso(task["created"], f"{tp}.created")
+        changed_dt = _parse_iso(task["changed"], f"{tp}.changed")
+        if changed_dt < created_dt:
+            raise SchemaError(f"{tp}.changed: must be >= created")
+
+        assignments = task["assignments"]
+        if not isinstance(assignments, list):
+            raise SchemaError(f"{tp}.assignments: must be a list")
+        prev_from: datetime.datetime | None = None
+        for j, entry in enumerate(assignments):
+            ap = f"{tp}.assignments[{j}]"
+            if not isinstance(entry, dict) or set(entry.keys()) != ASSIGNMENT_KEYS:
+                raise SchemaError(f"{ap}: must be dict with exactly member, from, to")
+            if not isinstance(entry["member"], str) or not MEMBER_RE.match(entry["member"]):
+                raise SchemaError(f"{ap}.member: must match ^[a-z0-9][a-z0-9-]*$")
+            from_dt = _parse_iso(entry["from"], f"{ap}.from")
+            if prev_from is not None and from_dt < prev_from:
+                raise SchemaError(f"{ap}.from: must be non-decreasing")
+            prev_from = from_dt
+            if entry["to"] is None:
+                if j != len(assignments) - 1:
+                    raise SchemaError(f"{ap}.to: null only allowed on last assignment")
+            else:
+                to_dt = _parse_iso(entry["to"], f"{ap}.to")
+                if to_dt < from_dt:
+                    raise SchemaError(f"{ap}.to: must be >= from")
+
+        queue = task["queue"]
+        if queue is not None and (not isinstance(queue, str) or not PRESET_RE.match(queue)):
+            raise SchemaError(f"{tp}.queue: must match ^[a-z0-9][a-z0-9-]*$ or null")
+
+        log = task["log"]
+        if not isinstance(log, list) or not log:
+            raise SchemaError(f"{tp}.log: must be a non-empty list")
+        prev_at: datetime.datetime | None = None
+        for j, entry in enumerate(log):
+            lp = f"{tp}.log[{j}]"
+            if not isinstance(entry, dict) or set(entry.keys()) != LOG_KEYS:
+                raise SchemaError(f"{lp}: must be dict with exactly at, by, change")
+            at_dt = _parse_iso(entry["at"], f"{lp}.at")
+            if prev_at is not None and at_dt < prev_at:
+                raise SchemaError(f"{lp}.at: must be non-decreasing")
+            prev_at = at_dt
+            if not isinstance(entry["by"], str) or not MEMBER_RE.match(entry["by"]):
+                raise SchemaError(f"{lp}.by: must match ^[a-z0-9][a-z0-9-]*$")
+            change = entry["change"]
+            if not isinstance(change, str) or not change.strip() or "\n" in change or "\r" in change:
+                raise SchemaError(f"{lp}.change: must be non-empty str with no newline")
+        earlier_ids.add(task_id)
+
+
+def validate_team(team: object, expected_team: str | None = None) -> None:
+    """Validate team.json subset. Raises SchemaError('<path>: <reason>')."""
+    if not isinstance(team, dict):
+        raise SchemaError("top level: must be dict", filename="team.json")
+    if not isinstance(team.get("team"), str) or not team["team"]:
+        raise SchemaError("team: must be non-empty str", filename="team.json")
+    if expected_team is not None and team["team"] != expected_team:
+        raise SchemaError(f"team: expected {expected_team!r}, got {team['team']!r}", filename="team.json")
+    lead = team.get("lead")
+    if not isinstance(lead, dict) or not isinstance(lead.get("name"), str) or not lead["name"]:
+        raise SchemaError("lead.name: must be non-empty str", filename="team.json")
+    if not isinstance(lead.get("preset"), str) or not lead["preset"]:
+        raise SchemaError("lead.preset: must be non-empty str", filename="team.json")
+    team_members = team.get("members")
+    if not isinstance(team_members, list):
+        raise SchemaError("members: must be a list", filename="team.json")
+    for idx, member in enumerate(team_members):
+        if not isinstance(member, dict) or not isinstance(member.get("name"), str) or not member["name"]:
+            raise SchemaError(f"members[{idx}].name: must be non-empty str", filename="team.json")
+        if not isinstance(member.get("preset"), str) or not member["preset"]:
+            raise SchemaError(f"members[{idx}].preset: must be non-empty str", filename="team.json")
+
+
+def _team_dir(team: str) -> Path:
+    if not TEAM_RE.match(team):
+        raise CliError(f"invalid team name {team!r}: must match {TEAM_RE.pattern}")
+    home = os.environ.get("TEAM_ROADMAP_HOME")
+    base = Path(home) if home else Path.home() / ".claude/teams"
+    return base / team
+
+
+def _read_team_json(team_dir: Path) -> tuple[bytes, dict]:
+    team_path = team_dir / "team.json"
+    if not team_path.is_file():
+        raise CliError(f"missing team.json at {team_path}", code=1)
+    try:
+        raw = team_path.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CliError(f"cannot read team.json at {team_path}: {exc}", code=1) from exc
+    validate_team(data, expected_team=team_dir.name)
+    return raw, data
+
+
+def load(team_dir: Path) -> dict:
+    """Return validated roadmap.json, or the empty default when absent."""
+    roadmap_path = team_dir / "roadmap.json"
+    if not roadmap_path.exists():
+        return _empty_roadmap()
+    try:
+        data = json.loads(roadmap_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SchemaError(f"cannot parse JSON ({exc})") from exc
+    validate_roadmap(data)
+    return data
+
+
+def save(team_dir: Path, roadmap: dict) -> None:
+    """Increment rev, validate schema, write .tmp, and os.replace. Caller holds the lock."""
+    roadmap["rev"] += 1
+    validate_roadmap(roadmap)
+    tmp_path = team_dir / "roadmap.json.tmp"
+    target_path = team_dir / "roadmap.json"
+    tmp_path.write_text(json.dumps(roadmap, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp_path, target_path)
+
+
+@contextlib.contextmanager
+def locked(team_dir: Path) -> Iterator[None]:
+    """Acquire an exclusive fcntl.flock on <team_dir>/roadmap.lock."""
+    lock_path = team_dir / "roadmap.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def members(team_dir: Path) -> list[str]:
+    """Return member names with lead first, then members[], from team.json."""
+    _, data = _read_team_json(team_dir)
+    return [data["lead"]["name"], *(entry["name"] for entry in data["members"])]
+
+
+def resolve_member(team: str, name: str, known: list[str]) -> str:
+    """Resolve short or full member name to full name; raise CliError(2) if unknown."""
+    if name in known:
+        return name
+    prefixed = f"{team}-{name}"
+    if prefixed in known:
+        return prefixed
+    raise CliError(f"unknown member {name} (members: {', '.join(known)})")
+
+
+def actor() -> str:
+    """Who runs this command: $AGENT_NAME (every hc launch sets it), or 'sam' when it's unset (Sam's own shell)."""
+    name = os.environ.get("AGENT_NAME", "").strip()
+    return name or "sam"
+
+
+def _short_member(team: str, name: str) -> str:
+    return name.removeprefix(f"{team}-")
+
+
+def now() -> str:
+    """Return local time as ISO 8601 with offset and seconds precision."""
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def snapshot(team_dir: Path, since: str | None) -> dict:
+    """Return {"token", "team", "roadmap"}, or {"unchanged": True} when since equals the current token.
+
+    token is "<rev>:<first 12 hex of sha1(team.json bytes)>", so it changes when a task changes or a member is
+    added. Reads without the lock: the CLI replaces both files atomically.
+    """
+    team_bytes, team_data = _read_team_json(team_dir)
+    roadmap = load(team_dir)
+    team_hash = hashlib.sha1(team_bytes).hexdigest()[:12]
+    token = f"{roadmap['rev']}:{team_hash}"
+    if since is not None and since == token:
+        return {"unchanged": True}
+    return {"token": token, "team": team_data, "roadmap": roadmap}
+
+
+def _read_brief(brief_file: str | None) -> str:
+    if brief_file is None:
+        return ""
+    if brief_file == "-":
+        return sys.stdin.read()
+    try:
+        return Path(brief_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CliError(f"cannot read brief file {brief_file}: {exc}") from exc
+
+
+def _find_task(roadmap: dict, task_id: str) -> dict:
+    for task in roadmap["tasks"]:
+        if task["id"] == task_id:
+            return task
+    raise CliError(f"unknown task id {task_id}")
+
+
+def cmd_add(args: argparse.Namespace) -> None:
+    """Handle the 'add' subcommand."""
+    team_dir = _team_dir(args.team)
+    known = members(team_dir)
+    if args.status not in VALID_STATUSES:
+        raise CliError(f"invalid status {args.status!r} (valid: {', '.join(VALID_STATUSES)})")
+    if not args.title.strip() or "\n" in args.title or "\r" in args.title:
+        raise CliError("title must be non-empty with no newline")
+    assignee = resolve_member(args.team, args.assign, known) if args.assign else None
+    brief = _read_brief(args.brief_file)
+    phase = args.phase.strip() if args.phase is not None and args.phase.strip() else None
+    prereqs = args.prereq or []
+
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        existing_ids = {t["id"] for t in roadmap["tasks"]}
+        for prereq in prereqs:
+            if prereq not in existing_ids:
+                raise CliError(f"unknown prereq {prereq}")
+        max_n = max((int(t["id"].split("-")[1]) for t in roadmap["tasks"]), default=0)
+        task_id = f"T-{max_n + 1}"
+        ts = now()
+        who = actor()
+        assignments = [{"member": assignee, "from": ts, "to": None}] if assignee else []
+        roadmap["tasks"].append(
+            {
+                "id": task_id,
+                "title": args.title,
+                "status": args.status,
+                "phase": phase,
+                "prereqs": list(prereqs),
+                "brief": brief,
+                "created": ts,
+                "changed": ts,
+                "assignments": assignments,
+                "queue": None,
+                "log": [{"at": ts, "by": who, "change": "added"}],
+            }
+        )
+        save(team_dir, roadmap)
+    print(task_id)
+
+
+def cmd_set_status(args: argparse.Namespace) -> None:
+    """Handle the 'set-status' subcommand."""
+    team_dir = _team_dir(args.team)
+    _read_team_json(team_dir)
+    if args.status not in VALID_STATUSES:
+        raise CliError(f"invalid status {args.status!r} (valid: {', '.join(VALID_STATUSES)})")
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        old_status = task["status"]
+        if old_status == args.status:
+            return
+        ts = now()
+        task["status"] = args.status
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": actor(), "change": f"status {old_status} → {args.status}"})
+        save(team_dir, roadmap)
+
+
+def cmd_assign(args: argparse.Namespace) -> None:
+    """Handle the 'assign' subcommand."""
+    team_dir = _team_dir(args.team)
+    known = members(team_dir)
+    target = None if args.member == "none" else resolve_member(args.team, args.member, known)
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        assignments = task["assignments"]
+        active = assignments[-1] if assignments and assignments[-1]["to"] is None else None
+        if target is None:
+            if active is None:
+                return
+            ts = now()
+            old_short = _short_member(args.team, active["member"])
+            active["to"] = ts
+            task["changed"] = ts
+            task["log"].append({"at": ts, "by": actor(), "change": f"unassigned {old_short}"})
+            save(team_dir, roadmap)
+            return
+        if active is not None and active["member"] == target:
+            return
+        ts = now()
+        if active is not None:
+            active["to"] = ts
+        assignments.append({"member": target, "from": ts, "to": None})
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": actor(), "change": f"assigned {_short_member(args.team, target)}"})
+        save(team_dir, roadmap)
+
+
+def cmd_set_brief(args: argparse.Namespace) -> None:
+    """Handle the 'set-brief' subcommand."""
+    team_dir = _team_dir(args.team)
+    _read_team_json(team_dir)
+    brief = _read_brief(args.brief_file)
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        task = _find_task(roadmap, args.id)
+        if task["brief"] == brief:
+            return
+        ts = now()
+        task["brief"] = brief
+        task["changed"] = ts
+        task["log"].append({"at": ts, "by": actor(), "change": "brief changed"})
+        save(team_dir, roadmap)
+
+
+def cmd_snapshot(args: argparse.Namespace) -> None:
+    """Handle the 'snapshot' subcommand."""
+    team_dir = _team_dir(args.team)
+    payload = snapshot(team_dir, args.since)
+    print(json.dumps(payload))
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="team-roadmap", description="Manage per-team roadmap tasks.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_add = sub.add_parser("add", help="Add a task to the team roadmap.")
+    p_add.add_argument("team")
+    p_add.add_argument("--title", required=True)
+    p_add.add_argument("--brief-file", default=None)
+    p_add.add_argument("--phase", default=None)
+    p_add.add_argument("--prereq", nargs="+", action="extend", default=[])
+    p_add.add_argument("--assign", default=None)
+    p_add.add_argument("--status", default="open")
+    p_add.set_defaults(func=cmd_add)
+
+    p_status = sub.add_parser("set-status", help="Update a task's status.")
+    p_status.add_argument("team")
+    p_status.add_argument("id")
+    p_status.add_argument("status")
+    p_status.set_defaults(func=cmd_set_status)
+
+    p_assign = sub.add_parser("assign", help="Assign or unassign a task.")
+    p_assign.add_argument("team")
+    p_assign.add_argument("id")
+    p_assign.add_argument("member")
+    p_assign.set_defaults(func=cmd_assign)
+
+    p_brief = sub.add_parser("set-brief", help="Update a task's markdown brief.")
+    p_brief.add_argument("team")
+    p_brief.add_argument("id")
+    p_brief.add_argument("--brief-file", required=True)
+    p_brief.set_defaults(func=cmd_set_brief)
+
+    p_snap = sub.add_parser("snapshot", help="Print a JSON snapshot for the mod.")
+    p_snap.add_argument("team")
+    p_snap.add_argument("--since", default=None)
+    p_snap.set_defaults(func=cmd_snapshot)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        args.func(args)
+    except SchemaError as exc:
+        print(f"{exc.filename}: {exc.message}", file=sys.stderr)
+        return 1
+    except CliError as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.code
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
