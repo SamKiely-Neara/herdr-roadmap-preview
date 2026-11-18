@@ -1185,6 +1185,69 @@ def cmd_step_edit(args: argparse.Namespace) -> None:
         save(team_dir, roadmap)
 
 
+def cmd_import(args: argparse.Namespace) -> None:
+    """Handle 'import' to append historic milestones and tasks all-or-nothing."""
+    team_dir = _team_dir(args.team)
+    _, team_data = _read_team_json(team_dir)
+    who = actor()
+    require(_is_lead(team_data, who), who, "import tasks", "only the lead can import tasks")
+
+    if args.file == "-":
+        source_label = "stdin"
+        try:
+            raw_text = sys.stdin.read()
+        except OSError as exc:
+            raise CliError(f"cannot read stdin: {exc}") from exc
+    else:
+        path = Path(args.file)
+        source_label = path.name
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CliError(f"cannot read import file {args.file}: {exc}") from exc
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"invalid JSON in {args.file}: {exc}") from exc
+
+    if not isinstance(payload, dict) or not set(payload.keys()).issubset({"milestones", "tasks"}):
+        raise CliError("import payload must be a JSON object with optional 'milestones' and 'tasks'")
+    imp_milestones = payload.get("milestones", [])
+    imp_tasks = payload.get("tasks", [])
+    if not isinstance(imp_milestones, list) or not isinstance(imp_tasks, list):
+        raise CliError("import 'milestones' and 'tasks' must be lists")
+
+    ts = now()
+    with locked(team_dir):
+        roadmap = load(team_dir)
+        existing_mids = {m["id"] for m in roadmap["milestones"]}
+        existing_tids = {t["id"] for t in roadmap["tasks"]}
+
+        for m in imp_milestones:
+            if isinstance(m, dict) and m.get("id") in existing_mids:
+                raise CliError(f"milestone id already exists: {m.get('id')}")
+        for t in imp_tasks:
+            if isinstance(t, dict) and t.get("id") in existing_tids:
+                raise CliError(f"task id already exists: {t.get('id')}")
+
+        prepared_tasks: list[dict] = []
+        for t in imp_tasks:
+            if not isinstance(t, dict) or not isinstance(t.get("log"), list):
+                raise CliError("each imported task must be an object with a 'log' list")
+            t_copy = dict(t)
+            t_copy["log"] = [*t["log"], {"at": ts, "by": who, "change": f"imported from {source_label}"}]
+            prepared_tasks.append(t_copy)
+
+        roadmap["milestones"].extend(imp_milestones)
+        roadmap["tasks"].extend(prepared_tasks)
+        try:
+            validate_roadmap(roadmap)
+        except SchemaError as exc:
+            raise CliError(f"invalid import payload: {exc.message}") from exc
+        save(team_dir, roadmap)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="team-roadmap", description="Manage per-team roadmap tasks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1300,6 +1363,11 @@ def _build_parser() -> argparse.ArgumentParser:
         p_step_act.add_argument("id")
         p_step_act.add_argument("n", type=int)
         p_step_act.set_defaults(func=cmd_step_edit)
+
+    p_import = sub.add_parser("import", help="Import historic milestones and tasks from a JSON file.")
+    p_import.add_argument("team")
+    p_import.add_argument("file")
+    p_import.set_defaults(func=cmd_import)
 
     return parser
 

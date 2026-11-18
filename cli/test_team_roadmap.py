@@ -916,3 +916,72 @@ def test_steps_crud_permissions_and_bounds(team_home: Path) -> None:
 
     steps = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]["tasks"][0]["steps"]
     assert steps == [{"text": "Second step", "done": True}]
+
+
+def test_import_preserves_history_and_is_atomic(team_home: Path, tmp_path: Path) -> None:
+    """import preserves historic timestamps, appends imported log entry, and rolls back on clash or cycle."""
+    _run(team_home, "milestone", "add", TEAM, "--title", "Existing M")
+    _run(team_home, "add", TEAM, "--title", "Existing T")
+
+    payload = {
+        "milestones": [
+            {"id": "M-10", "title": "Historic M", "goal": "Past work", "created": "2026-11-17T10:00:00+11:00"}
+        ],
+        "tasks": [
+            {
+                "id": "T-10",
+                "title": "Historic done",
+                "status": "done",
+                "milestone": "M-10",
+                "prereqs": ["T-1"],
+                "blocker": None,
+                "steps": [{"text": "shipped", "done": True}],
+                "brief": "Done earlier\n",
+                "created": "2026-11-17T10:05:00+11:00",
+                "changed": "2026-11-17T11:00:00+11:00",
+                "assignments": [
+                    {"member": f"{TEAM}-worker", "from": "2026-11-17T10:05:00+11:00", "to": "2026-11-17T11:00:00+11:00"}
+                ],
+                "queue": None,
+                "log": [
+                    {"at": "2026-11-17T10:05:00+11:00", "by": f"{TEAM}-lead", "change": "created"},
+                    {"at": "2026-11-17T11:00:00+11:00", "by": f"{TEAM}-lead", "change": "status open -> done"},
+                ],
+            },
+            {
+                "id": "T-11",
+                "title": "Depends on T-10",
+                "status": "open",
+                "milestone": "M-10",
+                "prereqs": ["T-10"],
+                "blocker": None,
+                "steps": [],
+                "brief": "",
+                "created": "2026-11-17T11:05:00+11:00",
+                "changed": "2026-11-17T11:05:00+11:00",
+                "assignments": [],
+                "queue": None,
+                "log": [{"at": "2026-11-17T11:05:00+11:00", "by": f"{TEAM}-lead", "change": "created"}],
+            },
+        ],
+    }
+    imp_file = tmp_path / "historic.json"
+    imp_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert _run(team_home, "import", TEAM, str(imp_file), agent_name=f"{TEAM}-worker").returncode == 3
+    res = _run(team_home, "import", TEAM, str(imp_file))
+    assert res.returncode == 0, res.stderr
+
+    snap = json.loads(_run(team_home, "snapshot", TEAM).stdout)["roadmap"]
+    assert [m["id"] for m in snap["milestones"]] == ["M-1", "M-10"]
+    assert [t["id"] for t in snap["tasks"]] == ["T-1", "T-10", "T-11"]
+    t10 = snap["tasks"][1]
+    assert t10["created"] == "2026-11-17T10:05:00+11:00"
+    assert t10["log"][-1]["change"] == "imported from historic.json"
+
+    # Clash on existing task id exits 2 and leaves roadmap.json untouched
+    roadmap_path = team_home / TEAM / "roadmap.json"
+    raw_before = roadmap_path.read_bytes()
+    clash = _run(team_home, "import", TEAM, str(imp_file))
+    assert clash.returncode == 2
+    assert roadmap_path.read_bytes() == raw_before
