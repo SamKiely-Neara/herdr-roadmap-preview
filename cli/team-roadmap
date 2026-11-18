@@ -70,6 +70,62 @@ def _parse_iso(value: object, path: str) -> datetime.datetime:
     return parsed
 
 
+
+def _validate_one_line(value: object, path: str, *, max_len: int | None = None, allow_empty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise SchemaError(f"{path}: must be str")
+    if not allow_empty and not value.strip():
+        raise SchemaError(f"{path}: must be non-empty str with no newline")
+    if "\n" in value or "\r" in value:
+        raise SchemaError(f"{path}: must be one line with no newline")
+    if max_len is not None and len(value) > max_len:
+        raise SchemaError(f"{path}: must be <= {max_len} chars")
+    return value
+
+
+def _validate_assignments_and_log(task: dict, tp: str) -> None:
+    assignments = task["assignments"]
+    if not isinstance(assignments, list):
+        raise SchemaError(f"{tp}.assignments: must be a list")
+    prev_from: datetime.datetime | None = None
+    for j, entry in enumerate(assignments):
+        ap = f"{tp}.assignments[{j}]"
+        if not isinstance(entry, dict) or set(entry.keys()) != ASSIGNMENT_KEYS:
+            raise SchemaError(f"{ap}: must be dict with exactly member, from, to")
+        if not isinstance(entry["member"], str) or not MEMBER_RE.match(entry["member"]):
+            raise SchemaError(f"{ap}.member: must match ^[a-z0-9][a-z0-9-]*$")
+        from_dt = _parse_iso(entry["from"], f"{ap}.from")
+        if prev_from is not None and from_dt < prev_from:
+            raise SchemaError(f"{ap}.from: must be non-decreasing")
+        prev_from = from_dt
+        if entry["to"] is None:
+            if j != len(assignments) - 1:
+                raise SchemaError(f"{ap}.to: null only allowed on last assignment")
+        else:
+            to_dt = _parse_iso(entry["to"], f"{ap}.to")
+            if to_dt < from_dt:
+                raise SchemaError(f"{ap}.to: must be >= from")
+
+    queue = task["queue"]
+    if queue is not None and (not isinstance(queue, str) or not PRESET_RE.match(queue)):
+        raise SchemaError(f"{tp}.queue: must match ^[a-z0-9][a-z0-9-]*$ or null")
+
+    log = task["log"]
+    if not isinstance(log, list) or not log:
+        raise SchemaError(f"{tp}.log: must be a non-empty list")
+    prev_at: datetime.datetime | None = None
+    for j, entry in enumerate(log):
+        lp = f"{tp}.log[{j}]"
+        if not isinstance(entry, dict) or set(entry.keys()) != LOG_KEYS:
+            raise SchemaError(f"{lp}: must be dict with exactly at, by, change")
+        at_dt = _parse_iso(entry["at"], f"{lp}.at")
+        if prev_at is not None and at_dt < prev_at:
+            raise SchemaError(f"{lp}.at: must be non-decreasing")
+        prev_at = at_dt
+        if not isinstance(entry["by"], str) or not MEMBER_RE.match(entry["by"]):
+            raise SchemaError(f"{lp}.by: must match ^[a-z0-9][a-z0-9-]*$")
+        _validate_one_line(entry["change"], f"{lp}.change")
+
 def validate_roadmap(roadmap: object) -> None:
     """Validate stored roadmap.json. Raises SchemaError('<path>: <reason>') on first violation.
 
@@ -92,6 +148,7 @@ def validate_roadmap(roadmap: object) -> None:
         log: non-empty list of {at, by, change}; at non-decreasing; by matches the member regex;
             change a non-empty str with no newline
     """
+
     if not isinstance(roadmap, dict) or set(roadmap.keys()) != TOP_KEYS:
         raise SchemaError("top level: must be dict with exactly schema, rev, tasks")
     if not _is_int(roadmap["schema"]) or roadmap["schema"] != 1:
@@ -113,9 +170,7 @@ def validate_roadmap(roadmap: object) -> None:
         if task_id in earlier_ids:
             raise SchemaError(f"{tp}.id: duplicate id {task_id}")
 
-        title = task["title"]
-        if not isinstance(title, str) or not title.strip() or "\n" in title or "\r" in title:
-            raise SchemaError(f"{tp}.title: must be non-empty str with no newline")
+        _validate_one_line(task["title"], f"{tp}.title")
         if task["status"] not in VALID_STATUSES:
             raise SchemaError(f"{tp}.status: invalid status {task['status']!r}")
         phase = task["phase"]
@@ -140,49 +195,7 @@ def validate_roadmap(roadmap: object) -> None:
         if changed_dt < created_dt:
             raise SchemaError(f"{tp}.changed: must be >= created")
 
-        assignments = task["assignments"]
-        if not isinstance(assignments, list):
-            raise SchemaError(f"{tp}.assignments: must be a list")
-        prev_from: datetime.datetime | None = None
-        for j, entry in enumerate(assignments):
-            ap = f"{tp}.assignments[{j}]"
-            if not isinstance(entry, dict) or set(entry.keys()) != ASSIGNMENT_KEYS:
-                raise SchemaError(f"{ap}: must be dict with exactly member, from, to")
-            if not isinstance(entry["member"], str) or not MEMBER_RE.match(entry["member"]):
-                raise SchemaError(f"{ap}.member: must match ^[a-z0-9][a-z0-9-]*$")
-            from_dt = _parse_iso(entry["from"], f"{ap}.from")
-            if prev_from is not None and from_dt < prev_from:
-                raise SchemaError(f"{ap}.from: must be non-decreasing")
-            prev_from = from_dt
-            if entry["to"] is None:
-                if j != len(assignments) - 1:
-                    raise SchemaError(f"{ap}.to: null only allowed on last assignment")
-            else:
-                to_dt = _parse_iso(entry["to"], f"{ap}.to")
-                if to_dt < from_dt:
-                    raise SchemaError(f"{ap}.to: must be >= from")
-
-        queue = task["queue"]
-        if queue is not None and (not isinstance(queue, str) or not PRESET_RE.match(queue)):
-            raise SchemaError(f"{tp}.queue: must match ^[a-z0-9][a-z0-9-]*$ or null")
-
-        log = task["log"]
-        if not isinstance(log, list) or not log:
-            raise SchemaError(f"{tp}.log: must be a non-empty list")
-        prev_at: datetime.datetime | None = None
-        for j, entry in enumerate(log):
-            lp = f"{tp}.log[{j}]"
-            if not isinstance(entry, dict) or set(entry.keys()) != LOG_KEYS:
-                raise SchemaError(f"{lp}: must be dict with exactly at, by, change")
-            at_dt = _parse_iso(entry["at"], f"{lp}.at")
-            if prev_at is not None and at_dt < prev_at:
-                raise SchemaError(f"{lp}.at: must be non-decreasing")
-            prev_at = at_dt
-            if not isinstance(entry["by"], str) or not MEMBER_RE.match(entry["by"]):
-                raise SchemaError(f"{lp}.by: must match ^[a-z0-9][a-z0-9-]*$")
-            change = entry["change"]
-            if not isinstance(change, str) or not change.strip() or "\n" in change or "\r" in change:
-                raise SchemaError(f"{lp}.change: must be non-empty str with no newline")
+        _validate_assignments_and_log(task, tp)
         earlier_ids.add(task_id)
 
 
