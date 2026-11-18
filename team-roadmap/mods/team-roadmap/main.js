@@ -6,7 +6,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { props, theme, nextCommand, checking } from "herdr";
 import { snapshot, watch } from "./source.js";
-import { toView } from "./model.js";
+import { relatedTo, toView } from "./model.js";
 import { layout } from "./layout.js";
 
 const MOD = "team-roadmap";
@@ -156,10 +156,27 @@ export default class TeamRoadmap extends View {
     if (!it.people.length) return "";
     return it.people.map((name) => this.shortOf(name, shorts)).join(" → ");
   }
+  kindColor(kind, t, c) {
+    if (kind === "done") return c.done;
+    if (kind === "active") return c.active;
+    if (kind === "partial") return c.partial;
+    if (kind === "blocked") return c.blocked;
+    if (kind === "ready") return t.foreground;
+    return t.muted;
+  }
+  // The 360 px card beside the map; beside it, so opening it never moves map coordinates.
+  sideCard(t) {
+    return v_flex().w(360).flex_none().border_l(1).border_color(t.border).bg(t.surface).overflow_y_scrollbar().p(16).gap(12);
+  }
 
-  station(it, t, c) {
+  section(title, t) {
+    return div().text_size(SMALL).font_semibold().text_color(t.muted).child(title);
+  }
+
+  station(it, t, c, dimmed = false) {
     const z = (n) => this.z(n), x = z(it.x), y = z(it.y), r = z(11), dot = z(12);
-    const box = () => h_flex().absolute().left(x - r).top(y - r).size(2 * r).rounded(r).bg(t.background).items_center().justify_center();
+    const box = () => h_flex().absolute().left(x - r).top(y - r).size(2 * r).rounded(r).bg(t.background)
+      .items_center().justify_center().when(dimmed, (el) => el.opacity(0.25));
     const round = () => div().size(dot).rounded(dot / 2);
     if (it.kind === "done") return box().child(round().bg(c.done));
     if (it.kind === "active") return box().border(2).border_color(c.active).child(round().bg(c.active));
@@ -170,16 +187,17 @@ export default class TeamRoadmap extends View {
     return box().child(round().border(1).border_color(c.quiet));
   }
 
-  label(it, h, t) {
+  label(it, h, t, dimmed = false) {
     const z = (n) => this.z(n), lh = `${z(16)}px`;
     const strong = it.kind === "ready" || it.kind === "active";
     return v_flex().absolute().left(z(it.x - 6)).bottom(z(h - it.y + 14)).w(z(LABEL))
+      .when(dimmed, (el) => el.opacity(0.25))
       .child(div().text_color(t.muted).text_size(z(SMALL)).font_semibold().line_height(lh).child(it.id))
       .child(div().max_h(z(32)).overflow_hidden().text_size(z(MID)).line_height(lh)
         .text_color(strong ? t.foreground : t.muted).child(it.title));
   }
 
-  under(it, t, c, shorts) {
+  under(it, t, c, shorts, dimmed = false) {
     const owners = this.ownerText(it, shorts);
     const queued = !it.assignee && it.queue
       ? (owners ? `${owners} → ${it.queue} queue` : `${it.queue} queue`)
@@ -207,18 +225,46 @@ export default class TeamRoadmap extends View {
     if (!text) return null;
     const z = (n) => this.z(n);
     return div().absolute().left(z(it.x - 6)).top(z(it.y + 12)).w(z(LABEL)).truncate().text_size(z(SMALL)).line_height(`${z(16)}px`)
-      .text_color(color).child(text);
+      .text_color(color).when(dimmed, (el) => el.opacity(0.25)).child(text);
   }
 
   // A prerequisite: right along the source's row, then down or up, then into the target.
   // `lane` shifts the vertical run, so two links into one column don't share a line.
-  link(a, b, t, c, lane = 0) {
+  link(a, b, t, c, lane = 0, dimmed = false) {
     const z = (n) => this.z(n), met = a.status === "done", color = met ? c.quiet : t.foreground;
-    const hl = (x, y, w) => div().absolute().left(z(x)).top(z(y) - 1).w(z(w)).h(0).border_t(met ? 1 : 2).border_color(color).when(!met, (el) => el.border_dashed());
-    const vl = (x, y1, y2) => div().absolute().left(z(x) - 1).top(z(Math.min(y1, y2))).w(0).h(z(Math.abs(y2 - y1))).border_l(met ? 1 : 2).border_color(color).when(!met, (el) => el.border_dashed());
+    const hl = (x, y, w) => div().absolute().left(z(x)).top(z(y) - 1).w(z(w)).h(0).border_t(met ? 1 : 2).border_color(color)
+      .when(!met, (el) => el.border_dashed()).when(dimmed, (el) => el.opacity(0.25));
+    const vl = (x, y1, y2) => div().absolute().left(z(x) - 1).top(z(Math.min(y1, y2))).w(0).h(z(Math.abs(y2 - y1))).border_l(met ? 1 : 2).border_color(color)
+      .when(!met, (el) => el.border_dashed()).when(dimmed, (el) => el.opacity(0.25));
     if (a.y === b.y) return [hl(a.x, a.y, b.x - a.x)];
     const xm = b.x - 24 - 8 * lane;
     return [hl(a.x, a.y, xm - a.x), vl(xm, a.y, b.y), hl(xm, b.y, b.x - xm)];
+  }
+
+  memberCard(member, taskById, t, c, stop) {
+    const openTasks = member.open.map((id) => taskById.get(id)).filter(Boolean);
+    const queuedTasks = member.queued.map((id) => taskById.get(id)).filter(Boolean);
+    const taskRow = (prefix, it) => h_flex().id(`rm-${prefix}-${it.id}`).gap(8).items_center().px(6).py(4).rounded(4)
+      .cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", stop)
+      .on_click((_e, cx) => { this.task = it.id; cx.notify(); })
+      .child(div().flex_none().text_size(SMALL).font_semibold().text_color(t.muted).child(it.id))
+      .child(div().flex_1().min_w(0).truncate().text_size(MID).text_color(t.foreground).child(it.title))
+      .child(div().flex_none().text_size(SMALL).text_color(this.kindColor(it.kind, t, c)).child(it.status));
+    const stateText = member.role === "former" ? "former" : member.state;
+    return this.sideCard(t)
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(BIG).font_semibold().child(member.name))
+        .child(h_flex().id("rm-card-close").size(22).items_center().justify_center().rounded(4).cursor_pointer()
+          .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_mouse_down("left", stop).on_click((_e, cx) => { this.member = null; cx.notify(); }).child("×")))
+      .child(div().text_size(SMALL).text_color(t.muted).child(`${member.preset ?? member.role} · ${stateText}`))
+      .child(v_flex().gap(4).child(this.section("Open items", t))
+        .children(openTasks.length ? openTasks.map((it) => taskRow("mo", it))
+          : [div().text_size(SMALL).text_color(t.dim).child("None")]))
+      .when(Boolean(member.preset && queuedTasks.length), (el) => el.child(v_flex().gap(4)
+        .child(this.section(`In the ${member.preset} queue`, t))
+        .children(queuedTasks.map((it) => taskRow("mq", it)))));
   }
 
   render(cx) {
@@ -268,6 +314,35 @@ export default class TeamRoadmap extends View {
           .child(`Add one with: team-roadmap add ${view.team} --title "First task"`)));
     }
 
+    const taskById = new Map(view.tasks.map((it) => [it.id, it]));
+    const lit = this.member ? relatedTo(view, this.member) : null;
+    const isDim = (id) => Boolean(lit && !lit.has(id));
+
+    const roster = h_flex().h(HEAD).flex_none().px(AXIS).gap(8).items_center().overflow_hidden()
+      .bg(t.chrome).border_t(1).border_color(t.border)
+      .children(view.members.map((m) => {
+        const selected = this.member === m.name;
+        let label = m.short;
+        let color = t.dim;
+        if (m.role !== "former") {
+          if (m.state === "working") {
+            label = `${m.short} · ${m.doing[0]}`;
+            color = c.active;
+          } else {
+            label = `${m.short} · idle`;
+            color = t.muted;
+          }
+          if (m.queued.length) label += ` · ${m.queued.length} queued`;
+        }
+        return h_flex().id(`rm-m-${m.name}`).h(22).px(8).flex_none().items_center().rounded(4)
+          .cursor_pointer().text_size(SMALL)
+          .when(selected, (el) => el.bg(t.selected).text_color(t.foreground))
+          .when(!selected, (el) => el.text_color(color).hover((s) => s.bg(t.hover)))
+          .on_mouse_down("left", stop)
+          .on_click((_e, cx) => { this.member = selected ? null : m.name; cx.notify(); })
+          .child(label);
+      }));
+
     // Geometry first, unzoomed: each phase block's width and each task's place.
     let x = AXIS, rows = 1;
     const blocks = view.phases.map((p) => ({ title: p.title, tasks: p.tasks, x: 0, w: 0 }));
@@ -294,21 +369,26 @@ export default class TeamRoadmap extends View {
       const mine = new Map(b.tasks.map((it) => [it.id, it]));
       for (const it of b.tasks) {
         it.prereqs.filter((p) => mine.has(p) && mine.get(p).d < it.d)
-          .forEach((p, lane) => els.push(...this.link(mine.get(p), it, t, c, lane)));
+          .forEach((p, lane) => {
+            const src = mine.get(p);
+            els.push(...this.link(src, it, t, c, lane, Boolean(lit && (!lit.has(src.id) || !lit.has(it.id)))));
+          });
       }
       for (const it of b.tasks) {
-        els.push(this.station(it, t, c), this.label(it, H, t));
-        const u = this.under(it, t, c, shorts);
+        const dimmed = isDim(it.id);
+        els.push(this.station(it, t, c, dimmed), this.label(it, H, t, dimmed));
+        const u = this.under(it, t, c, shorts, dimmed);
         if (u) els.push(u);
       }
     }
 
-    // The band on top: now, ready to start, waiting / blocked.
-    const now = view.tasks.filter((i) => i.kind === "active");
-    const ready = view.tasks.filter((i) => i.kind === "ready");
-    const wait = view.tasks.filter((i) => i.kind === "waiting");
-    const blocked = view.tasks.filter((i) => i.kind === "blocked");
-    const partial = view.tasks.filter((i) => i.kind === "partial");
+    // The band on top: now, ready to start, waiting / blocked / partial.
+    const visible = (i) => !lit || lit.has(i.id);
+    const now = view.tasks.filter((i) => i.kind === "active" && visible(i));
+    const ready = view.tasks.filter((i) => i.kind === "ready" && visible(i));
+    const wait = view.tasks.filter((i) => i.kind === "waiting" && visible(i));
+    const blocked = view.tasks.filter((i) => i.kind === "blocked" && visible(i));
+    const partial = view.tasks.filter((i) => i.kind === "partial" && visible(i));
     const cap = (s) => div().text_size(SMALL).line_height("16px").text_color(t.muted).child(s.toUpperCase());
     const none = () => div().line_height("24px").text_color(t.muted).child("nothing");
     const band = h_flex().flex_none().items_start().gap(GAP).px(AXIS).py(24).bg(t.chrome).border_t(1).border_b(1).border_color(t.border)
@@ -347,7 +427,7 @@ export default class TeamRoadmap extends View {
       .child(div().flex_1())
       .child(div().flex_none().text_color(t.dim).child("⌘ + scroll to zoom · drag to move"));
 
-    const map = div().id("rm-view").flex_1().min_h(0).relative().overflow_hidden().cursor_grab()
+    const map = div().id("rm-view").flex_1().min_w(0).min_h(0).h_full().relative().overflow_hidden().cursor_grab()
       .on_size_change((size, cx) => { this.viewport = size; if (!this.fitted) this.fit(); else this.clamp(); cx.notify(); })
       .on_scroll_wheel((e, cx) => {
         if (e.modifiers.platform || e.modifiers.control) {
@@ -369,6 +449,10 @@ export default class TeamRoadmap extends View {
       .child(div().absolute().left(-this.ox).top(-this.oy).w(z(W)).h(z(H + 64))
         .child(div().absolute().left(0).top(z(32)).w(z(W)).h(z(H)).children(els)));
 
-    return frame(header, band, map, footer);
+    const activeMember = this.member ? view.members.find((m) => m.name === this.member) ?? null : null;
+    const card = activeMember && !this.task ? this.memberCard(activeMember, taskById, t, c, stop) : null;
+    const body = card ? h_flex().flex_1().min_h(0).child(map).child(card) : map;
+
+    return frame(header, roster, band, body, footer);
   }
 }
