@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -539,3 +541,49 @@ def test_only_lead_reopens_done_and_starting_in_progress_pauses_other(team_home:
     res_assign = _run(team_home, "assign", TEAM, "T-3", "coder")
     assert res_assign.returncode == 0, res_assign.stderr
     assert "paused T-5" in res_assign.stderr.splitlines()
+
+
+def _load_cli_module() -> object:
+    loader = importlib.machinery.SourceFileLoader("team_roadmap_cli", str(CLI))
+    spec = importlib.util.spec_from_loader("team_roadmap_cli", loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_with_roadmap_tab_adds_idempotently_and_rejects_missing_space() -> None:
+    """with_roadmap_tab appends the Roadmap tab once, returns None on second call, and raises CliError(1) if missing."""
+    cli_mod = _load_cli_module()
+    doc = {
+        "spaces": [
+            {
+                "id": "demo-team",
+                "name": "demo-team",
+                "tabs": [
+                    {
+                        "id": "tb1",
+                        "name": "Main",
+                        "root": {"type": "row", "id": "tb1", "children": [{"type": "block", "id": "t1"}]},
+                    }
+                ],
+            }
+        ]
+    }
+
+    updated = cli_mod.with_roadmap_tab(doc, "demo-team", "mrct")
+    assert updated is not None
+    tabs = updated["spaces"][0]["tabs"]
+    assert len(tabs) == 2
+    roadmap_tab = tabs[1]
+    assert roadmap_tab["name"] == "Roadmap"
+    assert roadmap_tab["id"].startswith("tb")
+    block = roadmap_tab["root"]["children"][0]
+    assert block["id"].startswith("p")
+    assert block["content"] == {"mod": "team-roadmap", "props": {"team": "demo-team", "machine": "mrct"}}
+
+    assert cli_mod.with_roadmap_tab(updated, "demo-team", "mrct") is None
+
+    with pytest.raises(cli_mod.CliError) as exc_info:
+        cli_mod.with_roadmap_tab(doc, "missing-space", None)
+    assert exc_info.value.code == 1

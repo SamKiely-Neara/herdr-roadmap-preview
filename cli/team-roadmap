@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import datetime
 import fcntl
 import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
-from collections.abc import Iterator
+import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 TEAM_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,16}$")
@@ -615,6 +619,94 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     print(json.dumps(payload))
 
 
+def _has_roadmap_block(node: dict) -> bool:
+    content = node.get("content")
+    if isinstance(content, dict) and content.get("mod") == "team-roadmap":
+        return True
+    return any(_has_roadmap_block(child) for child in node.get("children", []) if isinstance(child, dict))
+
+
+def with_roadmap_tab(doc: dict, team: str, machine: str | None) -> dict | None:
+    """Return doc with a Roadmap tab appended to space <team>, or None if the space already has one.
+
+    Raises CliError(1) when the space doesn't exist. Pure: no I/O, so tests feed it a doc dict.
+    """
+    updated = copy.deepcopy(doc)
+    space = next((s for s in updated.get("spaces", []) if s.get("id") == team), None)
+    if space is None:
+        raise CliError(f"unknown space {team!r}", code=1)
+    tabs = space.setdefault("tabs", [])
+    if any(_has_roadmap_block(tab["root"]) for tab in tabs if isinstance(tab.get("root"), dict)):
+        return None
+    tid = f"tb{uuid.uuid4().hex}"
+    tabs.append(
+        {
+            "id": tid,
+            "name": "Roadmap",
+            "root": {
+                "type": "row",
+                "id": tid,
+                "children": [
+                    {
+                        "type": "block",
+                        "id": f"p{uuid.uuid4().hex}",
+                        "content": {"mod": "team-roadmap", "props": {"team": team, "machine": machine}},
+                    }
+                ],
+            },
+        }
+    )
+    return updated
+
+
+def _rpc(method: str, params: dict) -> dict:
+    """One JSON-RPC call via `hc connect`, adapted from space-layout.py's rpc().
+
+    Raises CliError(1) when hc can't be run or replies garbage, RuntimeError on an error reply (doc.set's version
+    conflict, which the caller retries).
+    """
+    hc = shutil.which("hc") or os.path.expanduser("~/.local/bin/hc")
+    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n"
+    try:
+        out = subprocess.run([hc, "connect"], input=request, capture_output=True, text=True, timeout=10, check=True)
+        reply = json.loads(out.stdout.splitlines()[0])
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, IndexError) as exc:
+        raise CliError(f"open-tab: {method} failed ({exc})", code=1) from exc
+    if "error" in reply:
+        raise RuntimeError(f"{method}: {reply['error']}")
+    return reply["result"]
+
+
+def _edit_app_doc(edit: Callable[[dict], dict | None], what: str) -> None:
+    """Apply `edit` to the app's layout doc with compare-and-set, retrying version conflicts up to 5 times.
+
+    `edit` returns the new doc, or None when there is nothing to change. Raises CliError(1) naming `what`.
+    """
+    for _ in range(5):
+        try:
+            doc = _rpc("doc.get", {"name": "herdr-app"})
+        except RuntimeError as exc:
+            raise CliError(f"{what}: {exc}", code=1) from exc
+        updated = edit(doc["value"])
+        if updated is None:
+            return
+        try:
+            _rpc("doc.set", {"name": "herdr-app", "value": updated, "version": doc["version"]})
+            return
+        except RuntimeError:
+            continue
+    raise CliError(f"{what}: doc.set kept failing", code=1)
+
+
+def cmd_open_tab(args: argparse.Namespace) -> None:
+    """Handle the 'open-tab' subcommand."""
+    if not TEAM_RE.match(args.team):
+        raise CliError(f"invalid team name {args.team!r}: must match {TEAM_RE.pattern}")
+    # The Mac app knows mrc as "mrct"; on the Mac itself the store is local (machine=None).
+    machine = None if sys.platform == "darwin" else "mrct"
+    _edit_app_doc(lambda doc: with_roadmap_tab(doc, args.team, machine), "open-tab")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="team-roadmap", description="Manage per-team roadmap tasks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -663,6 +755,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_snap.add_argument("team")
     p_snap.add_argument("--since", default=None)
     p_snap.set_defaults(func=cmd_snapshot)
+
+    p_open = sub.add_parser("open-tab", help="Append a Roadmap tab to the team's Herdr space.")
+    p_open.add_argument("team")
+    p_open.set_defaults(func=cmd_open_tab)
 
     return parser
 
